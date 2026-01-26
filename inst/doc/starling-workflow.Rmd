@@ -1,0 +1,399 @@
+---
+title: "Getting Started with starling"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting Started with starling}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+## Introduction
+
+The `starling` package provides tools for probabilistic data linkage in epidemiology, specifically designed for linking case notifications, hospitalization records, and vaccination histories. Named after the coordinated movements of starling flocks (murmurations), the package uses machine learning approaches to match records across datasets without requiring unique identifiers.
+
+### Why starling?
+
+In public health surveillance, you often need to link data from different sources:
+
+- Notifiable disease registries (case data)
+- Hospital admission databases
+- Immunization registries
+- Event linelists (outbreak investigations, flight manifests)
+
+These datasets rarely share unique identifiers, making probabilistic linkage essential for vaccine effectiveness studies, disease severity assessment, and outbreak investigation.
+
+## Core Workflow
+
+The `starling` package follows a three-step workflow:
+
+1. **`clean_the_nest()`** - Prepare and standardize datasets
+2. **`murmuration()`** - Link datasets using probabilistic matching
+3. **`preening()`** - Create analysis-ready variables and labels
+
+## Basic Example: Linking Cases to Vaccinations
+
+Let's start with a simple example linking respiratory disease cases to vaccination records.
+
+### Step 1: Prepare the Data
+
+```{r eval=FALSE}
+library(starling)
+
+# Load example datasets
+data(dx_data)      # Diagnosis/case data
+data(vax_data)     # Vaccination records
+
+# Clean the case data
+cases <- clean_the_nest(
+  data = dx_data,
+  data_type = "cases",
+  id_var = "identity",
+  diagnosis = "disease_name",
+  lettername1 = "first_name",
+  lettername2 = "surname",
+  dob = "date_of_birth",
+  medicare = "medicare_no",
+  gender = "gender",
+  postcode = "postcode",
+  onset_date = "diagnosis_date"
+)
+
+# Clean the vaccination data (convert to wide format)
+vaccines <- clean_the_nest(
+  data = vax_data,
+  data_type = "vaccination",
+  lie_nest_flat = TRUE,  # Convert from long to wide format
+  id_var = "patient_id",
+  lettername1 = "firstname",
+  lettername2 = "last_name",
+  dob = "birth_date",
+  medicare = "medicare_number",
+  gender = "gender",
+  postcode = "postcode",
+  vax_type = "vaccine_delivered",
+  vax_date = "service_date"
+)
+```
+
+### Step 2: Link the Datasets
+
+```{r eval=FALSE}
+# Link cases to vaccination history
+linked_data <- murmuration(
+  df1 = cases,
+  df2 = vaccines,
+  linkage_type = "v2c",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  threshold_value = 12,
+  days_allowed_before_event = 7,
+  clean_eggs = TRUE
+)
+```
+
+**Key parameters:**
+
+- `linkage_type = "v2c"`: Vaccine to case linkage
+- `blocking_var`: Variable to create matching blocks (reduces comparisons)
+- `compare_vars`: Variables used for string comparison scores
+- `threshold_value`: Higher values = more specific matches (default: 12)
+- `days_allowed_before_event`: Minimum days between vaccination and disease onset
+
+### Step 3: Prepare for Analysis
+
+```{r eval=FALSE}
+# Create analysis-ready dataset with labels and categories
+final_data <- preening(linked_data)
+
+# Now ready for analysis!
+library(gtsummary)
+final_data %>%
+  select(age5cat, gender, vaccination_status, admission_outcome) %>%
+  tbl_summary(by = vaccination_status)
+```
+
+## Advanced Example: Complete Case-Hospitalization-Vaccination Linkage
+
+For vaccine effectiveness studies, you often need to link all three datasets.
+
+```{r eval=FALSE}
+data(dx_data)
+data(hosp_data)
+data(vax_data)
+
+# Clean all datasets
+cases <- clean_the_nest(
+  data = dx_data,
+  data_type = "cases",
+  id_var = "identity",
+  diagnosis = "disease_name",
+  lettername1 = "first_name",
+  lettername2 = "surname",
+  dob = "date_of_birth",
+  medicare = "medicare_no",
+  gender = "gender",
+  postcode = "postcode",
+  onset_date = "diagnosis_date"
+)
+
+hospitals <- clean_the_nest(
+  data = hosp_data,
+  data_type = "hospital",
+  id_var = "patient_id",
+  lettername1 = "firstname",
+  lettername2 = "last_name",
+  dob = "birth_date",
+  medicare = "medicare_number",
+  gender = "sex",
+  postcode = "zip_codes",
+  icd_code = "icd_codes",
+  admission_date = "date_of_admission",
+  discharge_date = "date_of_discharge"
+)
+
+vaccines <- clean_the_nest(
+  data = vax_data,
+  data_type = "vaccination",
+  lie_nest_flat = TRUE,
+  id_var = "patient_id",
+  lettername1 = "firstname",
+  lettername2 = "last_name",
+  dob = "birth_date",
+  medicare = "medicare_number",
+  gender = "gender",
+  postcode = "postcode",
+  vax_type = "vaccine_delivered",
+  vax_date = "service_date"
+)
+
+# Link cases to vaccinations
+cases_vax <- murmuration(
+  df1 = cases,
+  df2 = vaccines,
+  linkage_type = "v2c",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob", "medicare10"),
+  threshold_value = 12,
+  clean_eggs = TRUE
+)
+
+# Link the combined dataset to hospitalizations
+complete_data <- murmuration(
+  df1 = cases_vax,
+  df2 = hospitals,
+  linkage_type = "v2h",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob", "medicare10"),
+  days_allowed_before_event = 7,
+  days_allowed_after_event = 30,
+  one_row_per_person = TRUE,
+  clean_eggs = TRUE
+)
+
+# Prepare for analysis
+analysis_data <- preening(complete_data)
+```
+
+## Event-Based Linkage
+
+The `v2e` linkage type is designed for outbreak investigations and event-specific vaccination status.
+
+### Flight Manifest Example
+
+```{r eval=FALSE}
+data(manifest_data)
+data(vax_data)
+
+# Clean manifest data
+manifest <- clean_the_nest(
+  data = manifest_data,
+  data_type = "cases",
+  id_var = "passenger_id",
+  lettername1 = "first_name",
+  lettername2 = "surname",
+  dob = "date_of_birth",
+  gender = "gender"
+)
+
+# Clean vaccination data
+vaccines <- clean_the_nest(
+  data = vax_data,
+  data_type = "vaccination",
+  lie_nest_flat = TRUE,
+  id_var = "patient_id",
+  lettername1 = "firstname",
+  lettername2 = "last_name",
+  dob = "birth_date",
+  gender = "gender",
+  vax_type = "vaccine_delivered",
+  vax_date = "service_date"
+)
+
+# Link to determine vaccination status at time of flight
+flight_vax <- murmuration(
+  df1 = manifest,
+  df2 = vaccines,
+  linkage_type = "v2e",
+  event_date = as.Date("2024-03-15"),  # Flight date
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  days_allowed_before_event = 14,  # Valid if vaccinated ≥14 days before flight
+  clean_eggs = TRUE
+)
+```
+
+### Outbreak Linelist Example
+
+```{r eval=FALSE}
+data(linelist_data)
+data(vax_data)
+
+# Clean outbreak linelist
+outbreak <- clean_the_nest(
+  data = linelist_data,
+  data_type = "cases",
+  id_var = "case_id",
+  lettername1 = "first_name",
+  lettername2 = "surname",
+  dob = "date_of_birth",
+  medicare = "medicare_no",
+  gender = "gender",
+  postcode = "postcode",
+  onset_date = "onset_date"
+)
+
+# Clean vaccination data
+vaccines <- clean_the_nest(
+  data = vax_data,
+  data_type = "vaccination",
+  lie_nest_flat = TRUE,
+  id_var = "patient_id",
+  lettername1 = "firstname",
+  lettername2 = "last_name",
+  dob = "birth_date",
+  medicare = "medicare_number",
+  gender = "gender",
+  postcode = "postcode",
+  vax_type = "vaccine_delivered",
+  vax_date = "service_date"
+)
+
+# Link to determine vaccination status at time of exposure
+outbreak_vax <- murmuration(
+  df1 = outbreak,
+  df2 = vaccines,
+  linkage_type = "v2e",
+  event_date = as.Date("2024-06-01"),  # Festival date
+  blocking_var = "postcode",
+  compare_vars = c("lettername1", "lettername2", "dob", "medicare10"),
+  days_allowed_before_event = 7,
+  clean_eggs = TRUE
+)
+```
+
+## Understanding Linkage Types
+
+The `murmuration()` function supports four linkage types:
+
+| Type | Use Case | Description |
+|------|----------|-------------|
+| `c2h` | Cases to hospitals | Link disease notifications to hospitalization records |
+| `v2c` | Vaccines to cases | Link vaccination history to disease cases |
+| `v2h` | Vaccines to hospitals | Link vaccination history to hospitalizations (test-negative studies) |
+| `v2e` | Vaccines to events | Link vaccination history to event participants (outbreaks, flights) |
+
+## Best Practices
+
+### Blocking Variables
+
+Blocking reduces computational burden by only comparing records that share certain characteristics:
+
+- **Good blocking variables:** Gender, birth year, postcode
+- **Bad blocking variables:** Continuous variables, unique values
+- Use `block1`, `block2`, `block3` created automatically by `clean_the_nest()`
+
+### Comparison Variables
+
+Choose variables with good discriminatory power:
+
+- **Essential:** Names (first and last), date of birth
+- **Helpful:** Medicare number, postcode
+- **Consider quality:** Typos, missing data, variations in spelling
+
+### Threshold Selection
+
+The `threshold_value` determines match stringency:
+
+- **Higher (>12):** More specific, fewer false matches, may miss true matches
+- **Lower (<12):** More sensitive, more matches, more false positives
+- **Default (12):** Balanced for typical Australian administrative data
+- **Recommendation:** Validate with known matches, adjust as needed
+
+### Date Formatting
+
+Always ensure dates are properly formatted before linkage:
+
+```{r eval=FALSE}
+# Check date format
+class(data$dob)  # Should return "Date"
+
+# Convert if needed
+data$dob <- as.Date(data$dob, format = "%Y-%m-%d")
+# or using lubridate
+data$dob <- lubridate::ymd(data$dob)
+```
+
+### Age Categories
+
+The `preening()` function creates 21 age categorization schemes. Choose the one that fits your analysis:
+
+- `age5cat`: Standard public health (0-4, 5-17, 18-64, 65-74, 75+)
+- `age10cat`: Decade bands for age-stratified analysis
+- `age18cat`: Census-style 5-year bands
+- `age20cat`: Monthly categories for infant studies
+
+## Troubleshooting
+
+### No matches found
+
+- Check threshold is not too high
+- Verify blocking variable is appropriate
+- Inspect comparison variables for missing data
+- Review data cleaning (names especially)
+
+### Too many matches
+
+- Increase `threshold_value`
+- Add more comparison variables (e.g., medicare number)
+- Use more specific blocking variables
+
+### Missing vaccination data
+
+- Ensure vaccination dataset is complete (all dates and types present)
+- Set `drop_the_na_vax = TRUE` in `clean_the_nest()`
+- Check `lie_nest_flat = TRUE` for vaccination data
+
+## Next Steps
+
+For more information:
+
+- Check function documentation: `?murmuration`, `?clean_the_nest`, `?preening`
+- Explore additional helper functions: `homing()`, `molting()`, `feathers()`
+- Review example datasets: `?dx_data`, `?hosp_data`, `?vax_data`
+
+## Citation
+
+If you use starling in your research, please cite:
+
+```{r eval=FALSE}
+citation("starling")
+```
