@@ -28,30 +28,33 @@ review that make the murmuration trustworthy.
     standalone or from \code{preflight()}).
   \item \strong{\code{\link{flock}()}} — Generate blocking variables (single-field,
     phonetic, or composite) to partition records before linkage.
-  \item \strong{\code{\link{murmuration}()}} — Perform probabilistic record linkage
-    using the Fellegi-Sunter EM algorithm (\pkg{reclin2}) across four linkage
-    types: case-to-hospitalisation (\code{"c2h"}), vaccination-to-case
-    (\code{"v2c"}), vaccination-to-hospitalisation (\code{"v2h"}), and
-    vaccination-to-event (\code{"v2e"}).
+  \item \strong{\code{\link{murmuration}()}} — Link a cohort to a dated event
+    stream (\code{linkage_type = "cohort2event"} with an \code{event_type} of
+    \code{"vaccination"}, \code{"hospitalisation"}, or \code{"case"}), using
+    either \code{method = "probabilistic"} (Fellegi-Sunter EM via \pkg{reclin2})
+    or \code{method = "deterministic"} (exact-key matching, no scoring). Of the
+    historical four-code taxonomy, case-to-hospitalisation (\code{"c2h"}) and
+    vaccination-to-case (\code{"v2c"}) still work but are deprecated in favour of
+    \code{cohort2event}; vaccination-to-hospitalisation (\code{"v2h"}) and
+    vaccination-to-event (\code{"v2e"}) are defunct as of 2.0.0 (use
+    \code{cohort2event} with \code{event_type = "vaccination"}, and a fixed
+    \code{event_date} for an event linelist).
   \item \strong{\code{\link{murmuration_plot}()}} — Plot the linkage weight
     distribution to confirm the threshold is placed at the natural valley between
-    match and non-match clusters before finalising.
+    match and non-match clusters before finalising. Only applicable to
+    \code{method = "probabilistic"} output — deterministic linkage has no score
+    to plot.
 }
 
 ## Threshold guidance
 
 See \code{\link{murmuration_plot}} for a discussion of threshold selection.
-The default of 12 in \code{murmuration()} is a conservative starting point;
-17 is a reasonable default for Australian linkage with Medicare + 2 names + DOB.
-Always plot the distribution first.
-}
-\seealso{
-Useful links:
-\itemize{
-  \item \url{https://github.com/nrsmoll/starling}
-  \item Report bugs at \url{https://github.com/nrsmoll/starling/issues}
-}
-
+\code{murmuration()}'s default \code{threshold_value} is \strong{16}, calibrated
+for five comparison variables (first name, surname, date of birth, Medicare number,
+and postcode or gender) with an agreeing Medicare number. With fewer variables, or
+Medicare numbers that are missing or from an older card, true matches score lower:
+always plot the distribution first, and see
+\code{vignette("threshold-selection", package = "starling")}.
 }
 \author{
 \strong{Maintainer}: Nicolas Smoll \email{nicolas.smoll@health.qld.gov.au} (\href{https://orcid.org/0000-0002-6923-9701}{ORCID})

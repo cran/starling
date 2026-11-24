@@ -13,144 +13,661 @@ output:
     toc: true
     toc_depth: 3
 vignette: >
-  %\VignetteIndexEntry{Pre-Linkage Data Quality}
+  %\VignetteIndexEntry{Pre-Linkage Data Quality: preflight(), check_medicare(), and flock()}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
 ```{r setup, include = FALSE}
+# The worked data (the clutch datasets) live in mudnester, a suggested
+# package: without it the vignette stops after the notice below.
+has_mudnester <- requireNamespace("mudnester", quietly = TRUE) &&
+  utils::packageVersion("mudnester") >= "0.9.0"   # the clutch datasets arrived in 0.9.0
+has_phonics   <- requireNamespace("phonics", quietly = TRUE)
 knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment  = "#>",
-  message  = FALSE,
-  warning  = FALSE
+  fig.retina = 1,   # 1x figures: keeps the built HTML small for CRAN
+  collapse   = TRUE,
+  comment    = "#>",
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 8,
+  fig.height = 4.5,
+  eval       = has_mudnester
 )
 ```
 
-## Why pre-linkage quality matters
+```{r needs-mudnester, echo = FALSE, eval = !has_mudnester, results = "asis"}
+cat("This vignette uses the clutch datasets from the mudnester package.",
+    "Install mudnester (>= 0.9.0) to run it.")
+knitr::knit_exit()
+```
+
+```{r load}
+library(starling)
+library(mudnester)   # clean_the_nest() and the clutch_* datasets
+library(dplyr)
+library(ggplot2)
+
+aviary_cols <- c(satin = "#325D88", chestnut = "#86251C", wattle = "#D8A31A",
+                 evergreen = "#08403B", mud = "#A67D4C", slate = "#3E3F3A")
+```
+
+## (*)> Why pre-linkage quality matters
 
 The Fellegi-Sunter EM algorithm scores pairs by comparing field values. Poor
-data quality in any of those fields degrades the score distribution in ways that
-no threshold choice can fully recover:
+data quality in any of those fields degrades the score distribution in ways
+that no threshold choice can fully recover:
 
-- **High missingness** in a comparison variable reduces its discriminating power,
-  flattening the valley between match and non-match clusters.
-- **Invalid Medicare numbers** that happen to match a wrong AIR record add
-  spurious positive weight to false pairs.
-- **Name typos** are expected (the algorithm handles them via fuzzy string
-  comparison) but systematic truncation or encoding differences are not.
-- **Duplicate IDs** in the primary dataset produce multiple output rows per
-  original record, inflating counts and biasing VE estimates.
+- **High missingness** in a comparison variable removes its contribution to
+  the weight, so true matches drift down towards the non-match cluster.
+- **Invalid Medicare numbers** that happen to resemble another person's add
+  spurious weight to false pairs.
+- **Name variation** (nicknames, same-sound spellings, typos) is expected,
+  but systematic encoding differences are not.
+- **Inconsistent coding** of a blocking field means true pairs are never even
+  compared.
 
-`starling` provides three functions specifically for catching these issues before
-`murmuration()` is called.
+This vignette works through all four on two of the `clutch` teaching
+datasets shipped in `mudnester`: the notifiable-disease linelist
+(`clutch_cases`, `r format(nrow(clutch_cases), big.mark = ",")`
+notifications) and the Australian Immunisation Register extract
+(`clutch_air`, `r format(nrow(clutch_air), big.mark = ",")` encounter rows). Both are
+synthetic -- no real person data -- but built with the error profiles of real
+NoCS and AIR extracts, following the notifications + AIR design of a regional
+Queensland vaccine effectiveness linkage study [1]. Each record carries a `truth_id`, which real data never
+has; we use it here only to *measure* how much each data-quality decision
+costs.
 
----
+***
 
-## `preflight()` — structured pre-linkage audit
+## (*)> The raw extracts
+
+```{r raw}
+clutch_cases |>
+  select(notification_id, condition, first_name, surname, date_of_birth, sex,
+         medicare_number) |>
+  head(6) |>
+  knitr::kable()
+
+clutch_air |>
+  select(air_id, given_name, family_name, date_of_birth, sex, medicare_card,
+         medicare_irn, date_of_service, antigen) |>
+  head(6) |>
+  knitr::kable()
+```
+
+Two things are already visible: the case linelist has mixed-case names and
+some 11-digit Medicare numbers (IRN appended), while the AIR stores
+upper-case family names, the 10-digit card number, and the IRN in a column of
+its own.
+
+***
+
+## (*)> Cleaning both sides the same way
+
+`mudnester::clean_the_nest()` standardises both extracts into the same
+schema (`lettername1`, `lettername2`, `dob`, `gender`, `medicare10`, ...).
+About 10% of respiratory notifications have no onset date, so the specimen
+date stands in for them first -- an event date that is `NA` would otherwise
+switch off the event window inside `murmuration()`. The AIR keeps the IRN in a
+column of its own, named with `medicare_irn` (a column called exactly
+`medicare_irn` is picked up automatically, with a message); on the
+notifications it comes from the 11th digit wherever one was recorded.
+
+```{r clean}
+cases_raw <- clutch_cases |>
+  mutate(
+    onset_imputed = is.na(onset_date),                  # keep a flag
+    onset_date    = coalesce(onset_date, specimen_date) # fall back to the specimen date
+  )
+
+cases_clean <- clean_the_nest(
+  cases_raw,
+  data_type   = "cases",
+  drop_eggs   = TRUE,
+  id_var      = "notification_id",
+  diagnosis   = "condition",
+  lettername1 = "first_name",
+  lettername2 = "surname",
+  dob         = "date_of_birth",
+  gender      = "sex",
+  postcode    = "postcode",
+  medicare    = "medicare_number",
+  onset_date  = "onset_date",
+  keep_vars   = c("truth_id", "onset_imputed")
+)
+```
+
+> **(*)> One vaccine type at a time.** This vignette is about identifiers, so
+> it pivots *every* AIR encounter into one row per person -- a person frame
+> whose `vax_date_*` columns mix COVID-19, influenza, zoster and MMR doses.
+> That is fine for checking names, dates of birth and Medicare numbers. For a
+> vaccine question, filter the AIR extract to that vaccine first (for example
+> `filter(antigen == "COVID-19")`) before `clean_the_nest(lie_nest_flat = TRUE)`
+> and `murmuration()`; otherwise the dose counts and `vaccination_status` mean
+> "any vaccine". `vignette("linked-cohort")` does exactly that.
+
+```{r clean-air}
+air_clean <- clean_the_nest(
+  clutch_air,                    # all antigens: a person frame for identifier checks
+  data_type     = "vaccination",
+  lie_nest_flat = TRUE,          # one row per person: vax_date_1, vax_type_1, ...
+  drop_eggs     = TRUE,
+  id_var        = "air_id",
+  lettername1   = "given_name",
+  lettername2   = "family_name",
+  dob           = "date_of_birth",
+  gender        = "sex",
+  postcode      = "postcode",
+  medicare      = "medicare_card",
+  medicare_irn  = "medicare_irn",  # the IRN is stored apart from the card number
+  vax_type      = "antigen",
+  vax_date      = "date_of_service",
+  keep_vars     = "truth_id"
+)
+
+c(cases = nrow(cases_clean), air_people = nrow(air_clean))
+```
+
+`lie_nest_flat = TRUE` turned `r nrow(clutch_air)` AIR rows into
+`r nrow(air_clean)` people. The `r sum(is.na(clutch_air$antigen))`
+registration-only rows (people enrolled on the AIR with no vaccine recorded)
+were dropped by the default `drop_the_na_vax = TRUE`.
+
+### How names are standardised
+
+Names are lowercased, transliterated to ASCII, and stripped of spaces *and*
+punctuation, so `"O'Brien"`, `"O Brien"` and `"OBRIEN"` all agree: some source
+systems cannot store an apostrophe, a hyphen or a space at all, and the
+cleaned value has to be the same whichever system the name came through.
+Given names come back two ways: `lettername1` is the first given name only
+(the first word, then stripped), and `lettername1_full` is every given name
+squeezed together. Examples from the AIR:
+
+```{r names}
+air_names <- clutch_air |>
+  distinct(air_id, given_name, family_name) |>
+  inner_join(air_clean |> select(air_id = id_var, lettername1, lettername1_full, lettername2),
+             by = "air_id")
+
+bind_rows(
+  air_names |> filter(grepl(" ", trimws(given_name)))  |> head(3),  # compound given names
+  air_names |> filter(grepl(" ", trimws(family_name))) |> head(2),  # spaced family names
+  air_names |> filter(grepl("[-']", family_name))      |> head(3)   # hyphens, apostrophes
+) |>
+  select(-air_id) |>
+  knitr::kable(caption = "Raw and cleaned AIR names")
+```
+
+For the same person, how often does each cleaned field agree exactly between
+the notification and the AIR?
+
+```{r names-agreement}
+# each notification next to the same person's AIR record (truth_id: measurement only)
+same_person <- cases_clean |>
+  inner_join(air_clean, by = "truth_id", suffix = c("_case", "_air"))
+
+name_agreement <- same_person |>
+  summarise(
+    l1      = mean(lettername1_case == lettername1_air, na.rm = TRUE),
+    l1_full = mean(lettername1_full_case == lettername1_full_air, na.rm = TRUE),
+    l2      = mean(lettername2_case == lettername2_air, na.rm = TRUE)
+  )
+name_agreement <- tibble(
+  field     = c("lettername1 (first given name)",
+                "lettername1_full (all given names)",
+                "lettername2 (family name)"),
+  agree_pct = round(100 * c(name_agreement$l1, name_agreement$l1_full,
+                            name_agreement$l2), 1)
+)
+knitr::kable(name_agreement,
+             caption = "Same person, notification vs AIR: % of cleaned names agreeing exactly")
+```
+
+On notifications the two given-name fields agree about equally often
+(`r name_agreement$agree_pct[1]`% and `r name_agreement$agree_pct[2]`%):
+where a given name is compound, both sources usually record all of it. The
+first-name rule earns its place where one source records middle names and the
+other does not -- a flight manifest copies the passport, for instance (see
+`vignette("clean-the-nest", package = "mudnester")`). Compare on
+`lettername1_full` instead where compound given names are the norm, or use it
+for a second pass. Exact disagreement is not the end of a pair either:
+`murmuration()` scores names by string similarity, so a dropped letter still
+earns most of the weight.
+
+***
+
+## (*)> `preflight()` -- structured pre-linkage audit
 
 `preflight()` runs a battery of checks across both datasets and returns a
 structured report. It is the recommended first step before any linkage call.
 
 ```{r preflight}
-library(starling)
-data(cases_notifiable)
-data(vax_air)
-
 audit <- preflight(
-  data1        = cases_notifiable,
-  data2        = vax_air,
+  data1        = cases_clean,
+  data2        = air_clean,
   linkage_vars = c("lettername1", "lettername2", "dob", "medicare10"),
   id_col1      = "id_var",
   id_col2      = "id_var",
   date_cols    = c("dob", "onset_date"),
   medicare_col = "medicare10",
-  verbose      = TRUE
+  verbose      = FALSE
 )
-```
 
-The `audit` list contains structured results for programmatic access:
-
-```{r audit-structure}
-# Completeness table
-head(audit$completeness)
-
-# Duplicate ID counts
-audit$duplicates
-
-# Flags raised (empty = all clear)
+knitr::kable(audit$completeness, digits = 1,
+             caption = "Completeness of the linkage variables")
+knitr::kable(audit$duplicates, digits = 1,
+             caption = "Identifier uniqueness")
 audit$flags
 ```
 
----
+Medicare is missing for
+`r round(100 * mean(is.na(cases_clean$medicare10)))`% of notifications -- the
+single largest gap and, with reissued cards (below), the reason true matches
+split into separate clusters of linkage weight (see
+`vignette("threshold-selection")`). Gaps and errors on this scale are normal:
+a regional infant immunisation coverage study had to resolve identifier and
+date-of-birth errors in about one birth-register record in ten [2].
 
-## `check_medicare()` — Modulus 10 checksum validation
+***
 
-Australian Medicare numbers contain a check digit at position 9 calculated
-from positions 1–8 using the weights 1, 3, 7, 9, 1, 3, 7, 9. 
+## (*)> `check_medicare()` -- Modulus 10 checksum validation
+
+Australian Medicare numbers contain a check digit at position 9, calculated
+from positions 1--8 using the weights 1, 3, 7, 9, 1, 3, 7, 9.
 `check_medicare()` verifies this and returns a three-state flag:
 
 | Value | Meaning |
 |---|---|
-| `1L` | Checksum passes — number is internally consistent |
-| `0L` | Checksum fails — at least one digit is wrong |
-| `NA` | Missing, blank, or non-numeric — not verifiable |
+| `1L` | Checksum passes -- number is internally consistent |
+| `0L` | Checksum fails -- at least one digit is wrong |
+| `NA` | Missing, blank, or non-numeric -- not verifiable |
 
 ```{r medicare}
-cases_checked <- check_medicare(
-  cases_notifiable,
-  medicare_col = "medicare10",
-  output_col   = "medicare_valid",
-  verbose      = TRUE
-)
+cases_checked <- cases_clean |>
+  check_medicare(medicare_col = "medicare10", output_col = "medicare_valid",
+                 verbose = FALSE)
+air_checked <- air_clean |>
+  check_medicare(medicare_col = "medicare10", output_col = "medicare_valid",
+                 verbose = FALSE)
 
-# Distribution of flags
-table(cases_checked$medicare_valid, useNA = "always")
+medicare_summary <- bind_rows(
+  cases_checked |> transmute(dataset = "clutch_cases", medicare_valid),
+  air_checked   |> transmute(dataset = "clutch_air",   medicare_valid)
+) |>
+  mutate(status = case_when(medicare_valid %in% 1L ~ "Valid",
+                            medicare_valid %in% 0L ~ "Fails checksum",
+                            TRUE                   ~ "Missing")) |>
+  count(dataset, status) |>
+  group_by(dataset) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  ungroup()
+
+knitr::kable(medicare_summary)
 ```
+
+```{r medicare-plot, fig.height = 3}
+ggplot(medicare_summary, aes(x = pct, y = dataset, fill = status)) +
+  geom_col() +
+  scale_fill_manual(values = c("Valid" = aviary_cols[["evergreen"]],
+                               "Fails checksum" = aviary_cols[["chestnut"]],
+                               "Missing" = "grey75")) +
+  labs(x = "Percent of records", y = NULL, fill = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+`clean_the_nest()` already records a logical `medicare_valid`;
+`check_medicare()` replaces it with the three-state integer above, which keeps
+"missing" distinct from "wrong".
 
 ### What to do with invalid Medicare numbers
 
-Do not discard the record — it may still link correctly on name and DOB. Instead,
-replace the invalid number with `NA` before linkage so it does not contribute
-negatively to the score:
+Do not discard the record -- it may still link correctly on name and date of
+birth. Replace the invalid number with `NA` so it contributes nothing, rather
+than adding misleading partial agreement:
 
 ```{r fix-medicare}
-cases_checked$medicare10 <- ifelse(
-  cases_checked$medicare_valid == 1L,
-  cases_checked$medicare10,
-  NA_character_
-)
+cases_checked <- cases_checked |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10))
+air_checked <- air_checked |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10))
 ```
 
----
+### Households share a card; the IRN tells them apart
 
-## `flock()` — blocking variable construction
+Households share a Medicare card: everyone on it has the same 10 digits and
+differs only by the IRN (individual reference number), the 11th digit. In the
+AIR extract:
 
-`flock()` creates one to three blocking keys from demographic fields. Blocking
-restricts `murmuration()` to comparing only pairs that share a blocking key,
-making the search tractable for large datasets without sacrificing recall on
-the key variables.
+```{r household-cards}
+air_checked |>
+  filter(!is.na(medicare10)) |>
+  count(medicare10, name = "people_on_card") |>   # people per card...
+  count(people_on_card, name = "n_cards") |>       # ...and cards of each size
+  knitr::kable(caption = "AIR people sharing a 10-digit Medicare number")
+```
+
+A comparison that rewards Medicare agreement will therefore score parents,
+partners and children of the true person highly. That is why Medicare is a
+*comparison* variable alongside names and date of birth, never a blocking
+variable or a deterministic key on its own.
+
+`clean_the_nest()` returns the IRN as `medicare_irn` and the person's own
+number as `medicare11` (`medicare10` followed by the IRN): household members
+share `medicare10` but never `medicare11`. The catch is how often each source
+records the IRN:
+
+```{r irn-availability}
+detail_levels <- c("Card number + IRN", "Card number only", "No valid number")
+
+medicare_detail <- bind_rows(
+  cases_checked |> transmute(dataset = "clutch_cases", medicare10, medicare_irn),
+  air_checked   |> transmute(dataset = "clutch_air",   medicare10, medicare_irn)
+) |>
+  mutate(detail = case_when(!is.na(medicare10) & !is.na(medicare_irn) ~ detail_levels[1],
+                            !is.na(medicare10)                        ~ detail_levels[2],
+                            TRUE                                      ~ detail_levels[3]),
+         detail = factor(detail, levels = rev(detail_levels))) |>
+  count(dataset, detail, .drop = FALSE) |>
+  group_by(dataset) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  ungroup() |>
+  arrange(desc(dataset), desc(detail))
+
+pct_cases_with_irn <- medicare_detail |>
+  filter(dataset == "clutch_cases", detail == "Card number + IRN") |>
+  pull(pct)
+
+knitr::kable(medicare_detail, caption = "How much of the Medicare number each source records")
+```
+
+```{r irn-plot, fig.height = 2.8, fig.cap = "Medicare detail recorded, by source. Invalid numbers have already been set to NA."}
+ggplot(medicare_detail, aes(x = pct, y = dataset, fill = detail)) +
+  geom_col() +
+  scale_fill_manual(values = c("Card number + IRN" = aviary_cols[["satin"]],
+                               "Card number only"  = aviary_cols[["wattle"]],
+                               "No valid number"   = "grey75"),
+                    breaks = detail_levels) +
+  labs(x = "Percent of records", y = NULL, fill = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+Where both sides do record it, the IRN separates the person from the rest of
+the household. Every notification with an IRN, paired with every AIR person
+on the same 10-digit card:
+
+```{r irn-households}
+cases_with_irn <- cases_checked |>
+  filter(!is.na(medicare10), !is.na(medicare_irn)) |>
+  select(medicare10, medicare_irn, truth_id)
+air_with_irn <- air_checked |>
+  filter(!is.na(medicare10), !is.na(medicare_irn)) |>
+  select(medicare10, medicare_irn, truth_id)
+
+cases_with_irn |>
+  inner_join(air_with_irn, by = "medicare10", suffix = c("_case", "_air"),
+             relationship = "many-to-many") |>
+  mutate(irn    = if_else(medicare_irn_case == medicare_irn_air, "IRN agrees", "IRN differs"),
+         person = if_else(truth_id_case == truth_id_air, "Same person", "Different person")) |>
+  count(irn, person, name = "pairs") |>
+  knitr::kable(caption = "Notification-AIR pairs on the same card, IRN recorded on both")
+```
+
+The AIR records the IRN for almost everyone, but only
+`r pct_cases_with_irn`% of notifications carry it -- those where all 11
+digits were entered. That makes the IRN a decisive *review check* rather than
+a routine comparison variable: a candidate pair that agrees on `medicare10`
+but not on the IRN is a different person on the same card, and
+`vignette("threshold-selection")` uses it exactly that way. Scoring
+`medicare11` alongside `medicare10` would count the same card twice whenever
+both agree, which the Fellegi-Sunter model, assuming its fields are
+independent, cannot allow for.
+
+### `medicare09` or `medicare10`?
+
+`clean_the_nest()` splits the number into the account (`medicare08`), the
+account plus check digit (`medicare09`) and the full card number
+(`medicare10`). The tenth digit is the card *issue*: it changes every time a
+card is replaced. Comparing the same person's number across the two sources
+shows what that costs:
+
+```{r medicare-digits}
+medicare_agreement <- same_person |>
+  filter(!is.na(medicare10_case), !is.na(medicare10_air)) |>
+  summarise(m08 = mean(medicare08_case == medicare08_air),
+            m09 = mean(medicare09_case == medicare09_air),
+            m10 = mean(medicare10_case == medicare10_air))
+medicare_agreement <- tibble(
+  field = c("medicare08 (account)",
+            "medicare09 (account + check digit)",
+            "medicare10 (+ card issue digit)"),
+  agree_pct = round(100 * c(medicare_agreement$m08, medicare_agreement$m09,
+                            medicare_agreement$m10), 1)
+)
+knitr::kable(medicare_agreement,
+             caption = "Same person, both sources recorded a number: % agreeing")
+```
+
+Using `medicare10` as a comparison variable therefore penalises everyone whose
+card was reissued between the two records -- about
+`r round(medicare_agreement$agree_pct[2] - medicare_agreement$agree_pct[3])`
+in every hundred pairs here. `medicare09` keeps everything that identifies the
+account (household members still share it) without that penalty, and is the
+better comparison variable in new work. The other starling vignettes keep
+`medicare10` so their weights line up with the package's own examples;
+`vignette("threshold-selection")` measures what switching to `medicare09` does
+to recall at the default threshold.
+
+***
+
+## (*)> Inconsistent coding silently breaks blocking
+
+`clutch_hospital` codes sex as `"Male"`/`"Female"`; every other source uses
+`"M"`/`"F"`. A blocking key built from `gender` therefore never agrees across
+the two sources, and the true pairs are never compared:
+
+```{r sex-coding}
+clutch_hospital |> count(sex)
+clutch_air      |> count(sex)
+
+air_blocks <- clutch_air |>
+  distinct(block = paste(sex, format(date_of_birth, "%Y")))
+
+clutch_hospital |>
+  distinct(block = paste(sex, format(birth_date, "%Y"))) |>
+  semi_join(air_blocks, by = "block") |>
+  nrow()   # zero: no hospital record would ever meet an AIR record
+```
+
+Harmonise first, then build blocks:
+
+```{r sex-fix}
+hosp_raw <- clutch_hospital |>
+  mutate(sex = case_when(sex == "Male"   ~ "M",
+                         sex == "Female" ~ "F"))
+
+hosp_raw |>
+  distinct(block = paste(sex, format(birth_date, "%Y"))) |>
+  semi_join(air_blocks, by = "block") |>
+  nrow()
+```
+
+***
+
+## (*)> `flock()` -- blocking variable construction
+
+`flock()` creates up to three blocking keys. `murmuration()` only compares
+pairs that share a key, so the choice trades computation against the chance
+that a true pair is split across blocks.
 
 ```{r flock}
-# Single-field block (gender only — broadest, lowest specificity)
-cases_blocked <- flock(
-  cases_checked,
-  block1_vars    = "gender",         # block1: gender only
-  block2_vars    = "gender",         # block2: same here; use composite in production
-  block3_vars    = "postcode",       # block3: postcode (finer)
-  birth_year_col = "dob"             # derives birth_year column for composite use
+cases_blocked <- cases_checked |>
+  flock(block1_vars    = "gender",
+        block2_vars    = c("gender", "birth_year"),
+        block3_vars    = "postcode",
+        birth_year_col = "dob")
+air_blocked <- air_checked |>
+  flock(block1_vars    = "gender",
+        block2_vars    = c("gender", "birth_year"),
+        block3_vars    = "postcode",
+        birth_year_col = "dob")
+```
+
+Because the clutch carries a ground-truth identifier, we can measure two
+things for each key before running any linkage: how many candidate pairs it
+generates, and what share of true pairs land in the same block (blocking
+recall). Written out key by key:
+
+```{r block-evaluation}
+# candidate pairs = sum over shared keys of (records with the key) x (records with the key)
+pairs_block1 <- cases_blocked |>
+  filter(!is.na(block1)) |>
+  count(block1, name = "n_x") |>
+  inner_join(air_blocked |> count(block1, name = "n_y"), by = "block1") |>
+  summarise(pairs = sum(as.numeric(n_x) * n_y)) |>
+  pull(pairs)
+
+pairs_block2 <- cases_blocked |>
+  filter(!is.na(block2)) |>
+  count(block2, name = "n_x") |>
+  inner_join(air_blocked |> count(block2, name = "n_y"), by = "block2") |>
+  summarise(pairs = sum(as.numeric(n_x) * n_y)) |>
+  pull(pairs)
+
+pairs_block3 <- cases_blocked |>
+  filter(!is.na(block3)) |>
+  count(block3, name = "n_x") |>
+  inner_join(air_blocked |> count(block3, name = "n_y"), by = "block3") |>
+  summarise(pairs = sum(as.numeric(n_x) * n_y)) |>
+  pull(pairs)
+
+# blocking recall: the share of true pairs that land in the same block
+recall <- cases_blocked |>
+  select(truth_id, x1 = block1, x2 = block2, x3 = block3) |>
+  inner_join(air_blocked |> select(truth_id, y1 = block1, y2 = block2, y3 = block3),
+             by = "truth_id") |>
+  summarise(block1 = mean(x1 == y1, na.rm = TRUE),
+            block2 = mean(x2 == y2, na.rm = TRUE),
+            block3 = mean((x3 == y3) %in% TRUE))   # a missing postcode never matches
+
+blocking_table <- tibble(
+  block           = c("block1: gender", "block2: gender + birth year", "block3: postcode"),
+  candidate_pairs = c(pairs_block1, pairs_block2, pairs_block3),
+  blocking_recall = round(100 * c(recall$block1, recall$block2, recall$block3), 1)
+)
+knitr::kable(blocking_table, format.args = list(big.mark = ","))
+```
+
+Gender alone keeps nearly every true pair together but asks for
+`r round(pairs_block1 / 1e6, 1)` million comparisons. Gender + birth year is
+around `r round(pairs_block1 / pairs_block2)` times cheaper and still keeps
+`r blocking_table$blocking_recall[2]`% of true pairs together. The pairs it
+loses have either a birth year that differs between sources (off by one, or a
+decade slip such as `1958` keyed as `1968`) or a sex recorded differently
+(including `"U"`, unknown, on the notification). Postcode loses everyone who
+moved house between the two records, and every notification with no postcode.
+
+### Phonetic blocking
+
+A Soundex code of the surname is immune to birth-year errors and to many
+spelling variants (`Smith`/`Smyth`, `McDonald`/`MacDonald`, `Reid`/`Reed`),
+so it recovers a different set of true pairs:
+
+```{r phonetic, eval = has_mudnester && has_phonics}
+# block1: Soundex(surname) + gender; block2: gender + birth year, for comparison
+cases_phon <- cases_checked |>
+  flock(block1_vars     = c("lettername2_soundex", "gender"),
+        block2_vars     = c("gender", "birth_year"),
+        phonetic_vars   = "lettername2",
+        phonetic_method = "soundex",
+        birth_year_col  = "dob")
+air_phon <- air_checked |>
+  flock(block1_vars     = c("lettername2_soundex", "gender"),
+        block2_vars     = c("gender", "birth_year"),
+        phonetic_vars   = "lettername2",
+        phonetic_method = "soundex",
+        birth_year_col  = "dob")
+
+cases_phon |>
+  distinct(lettername2, lettername2_soundex) |>
+  head(8) |>
+  knitr::kable()
+
+pairs_soundex <- cases_phon |>
+  filter(!is.na(block1)) |>
+  count(block1, name = "n_x") |>
+  inner_join(air_phon |> count(block1, name = "n_y"), by = "block1") |>
+  summarise(pairs = sum(as.numeric(n_x) * n_y)) |>
+  pull(pairs)
+
+phonetic_recall <- cases_phon |>
+  select(truth_id, sdx_x = block1, year_x = block2) |>
+  inner_join(air_phon |> select(truth_id, sdx_y = block1, year_y = block2),
+             by = "truth_id") |>
+  mutate(same_soundex   = sdx_x == sdx_y,
+         same_birthyear = year_x == year_y) |>
+  summarise(year   = mean(same_birthyear, na.rm = TRUE),
+            sdx    = mean(same_soundex, na.rm = TRUE),
+            either = mean(same_birthyear | same_soundex, na.rm = TRUE))
+
+tibble(
+  strategy        = c("gender + birth year", "Soundex(surname) + gender",
+                      "either (two passes, union)"),
+  candidate_pairs = c(pairs_block2, pairs_soundex, pairs_block2 + pairs_soundex),
+  blocking_recall = round(100 * c(phonetic_recall$year, phonetic_recall$sdx,
+                                  phonetic_recall$either), 1)
+) |>
+  knitr::kable(format.args = list(big.mark = ","))
+```
+
+Neither single key reaches the combined recall: each loses a different kind
+of error. This is the case for **multi-pass blocking** -- run
+`murmuration()` once per key and keep the best-scoring link per record:
+
+```{r multi-pass, eval = FALSE}
+# For a vaccine question, the AIR side holds ONE vaccine type (see the callout above)
+air_covid_phon <- clutch_air |>
+  filter(antigen == "COVID-19") |>
+  clean_the_nest(data_type = "vaccination", lie_nest_flat = TRUE, ...) |>
+  check_medicare() |>
+  flock(block1_vars     = c("lettername2_soundex", "gender"),
+        block2_vars     = c("gender", "birth_year"),
+        phonetic_vars   = "lettername2",
+        phonetic_method = "soundex",
+        birth_year_col  = "dob")
+
+# pass 1: block on gender + birth year
+linked_year <- murmuration(
+  data_x          = cases_phon,
+  data_y          = air_covid_phon,
+  linkage_type    = "cohort2event",
+  event_type      = "vaccination",
+  event_date      = "onset_date",
+  id_var          = "id_var",
+  blocking_var    = "block2",             # gender + birth year
+  compare_vars    = c("lettername1", "lettername2", "dob", "medicare10"),
+  threshold_value = 8
 )
 
-vax_blocked <- flock(
-  vax_air,
-  block1_vars    = "gender",
-  block3_vars    = "postcode",
-  birth_year_col = "dob"
+# pass 2: block on Soundex(surname) + gender
+linked_sdx <- murmuration(
+  data_x          = cases_phon,
+  data_y          = air_covid_phon,
+  linkage_type    = "cohort2event",
+  event_type      = "vaccination",
+  event_date      = "onset_date",
+  id_var          = "id_var",
+  blocking_var    = "block1",             # Soundex(surname) + gender
+  compare_vars    = c("lettername1", "lettername2", "dob", "medicare10"),
+  threshold_value = 8
 )
 
-# Inspect blocking key distributions
-table(cases_blocked$block1)
-head(sort(table(cases_blocked$block3), decreasing = TRUE))
+# keep the best-scoring link per case across both passes
+linked_all <- bind_rows(linked_year, linked_sdx) |>
+  arrange(desc(threshold), desc(weights)) |>
+  distinct(id_var, .keep_all = TRUE)
 ```
 
 ### Choosing blocking variables for Australian datasets
@@ -158,60 +675,69 @@ head(sort(table(cases_blocked$block3), decreasing = TRUE))
 | Dataset size | Recommended block | Rationale |
 |---|---|---|
 | < 10 000 records | `gender` | Broadest; halves candidate space immediately |
-| 10 000–500 000 | `gender` + `birth_year` composite | Balances sensitivity and specificity |
+| 10 000--500 000 | `gender` + `birth_year` composite | Balances sensitivity and specificity |
 | > 500 000 | `postcode` + `birth_year` | Fine-grained; requires high postcode completeness |
+| Names captured verbally (contact tracing) | Soundex/Metaphone of surname + `gender`, as a second pass | Tolerates spelling variation and date-of-birth errors |
 
-For maximum recall, run `murmuration()` twice — once with a broad block, once
-with a fine block — and union the results:
+***
 
-```{r multi-pass, eval = FALSE}
-linked_broad <- murmuration(cases_blocked, vax_blocked,
-  blocking_var = "block1", ...)
-linked_fine  <- murmuration(cases_blocked, vax_blocked,
-  blocking_var = "block3", ...)
-
-# Union, keeping the highest-scoring link per case
-linked_all <- dplyr::bind_rows(linked_broad, linked_fine) |>
-  dplyr::group_by(id_var.x) |>
-  dplyr::slice_max(weights, n = 1, with_ties = FALSE) |>
-  dplyr::ungroup()
-```
-
----
-
-## Putting it together
+## (*)> Putting it together
 
 ```{r summary, eval = FALSE}
 library(starling)
-data(cases_notifiable); data(vax_air)
+library(mudnester)
+library(dplyr)
 
-# 1. Audit
-preflight(cases_notifiable, vax_air,
+# 1. Clean both sources the same way (impute missing onset dates first)
+cases <- clutch_cases |>
+  mutate(onset_date = coalesce(onset_date, specimen_date)) |>
+  clean_the_nest(data_type = "cases", id_var = "notification_id", ...)
+
+# ... and the AIR for ONE vaccine type
+air <- clutch_air |>
+  filter(antigen == "COVID-19") |>
+  clean_the_nest(data_type = "vaccination", lie_nest_flat = TRUE,
+                 medicare = "medicare_card", medicare_irn = "medicare_irn", ...)
+
+# 2. Audit
+preflight(cases, air,
           linkage_vars = c("lettername1", "lettername2", "dob", "medicare10"),
           medicare_col = "medicare10")
 
-# 2. Fix Medicare
-cases <- check_medicare(cases_notifiable)
-cases$medicare10 <- ifelse(cases$medicare_valid == 1L,
-                            cases$medicare10, NA_character_)
+# 3. Medicare: invalid numbers become NA; 4. Blocks (harmonise coding first)
+cases <- cases |>
+  check_medicare() |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10)) |>
+  flock(block1_vars = c("gender", "birth_year"), birth_year_col = "dob")
+air <- air |>
+  check_medicare() |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10)) |>
+  flock(block1_vars = c("gender", "birth_year"), birth_year_col = "dob")
 
-# 3. Block
-cases <- flock(cases, block1_vars = "gender", birth_year_col = "dob")
-vax   <- flock(vax_air, block1_vars = "gender", birth_year_col = "dob")
-
-# 4. Link
-linked <- murmuration(cases, vax,
-  linkage_type    = "v2c",
-  event_date      = "onset_date",
-  id_var          = "id_var",
-  blocking_var    = "block1",
-  compare_vars    = c("lettername1", "lettername2", "dob", "medicare10"),
-  threshold_value = 17)
+# 5. Link -- see vignette("linked-cohort")
 ```
 
----
+***
 
-## Session information
+## (*)> References
+
+1. Smoll NR, Al Imam MH, Shulz C, Booy R, Khandaker G. The effectiveness of
+   vaccination for preventing hospitalisation with COVID-19 in regional
+   Queensland: a data linkage study. Med J Aust. 2023;219(4):162--165.
+   doi:10.5694/mja2.52019. **Precedent**: the linkage key (first name, last
+   name, date of birth) and the notifications/admissions/AIR design these
+   datasets mirror.
+2. Roughan WH, Cavanagh-Ochiai B, Barnekow D, Lottkowitz K, Schafer K, Camadoo
+   L, Smoll NR. Infant respiratory syncytial virus (RSV) immunisation coverage
+   in an Australian regional area, 1 May 2024 -- 31 October 2025. Commun Dis
+   Intell. 2026;50. doi:10.33321/cdi.2026.50.031. **Precedent**: about 10% of
+   that study's birth-register records carried identifier or date-of-birth
+   errors, resolved with weighted-score matching; the clutch error rates are of
+   the same order.
+
+***
+
+## (*)> Session information
 
 ```{r session}
 sessionInfo()

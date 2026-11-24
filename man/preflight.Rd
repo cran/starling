@@ -19,11 +19,11 @@ preflight(
 )
 }
 \arguments{
-\item{data1}{First data frame (typically the case/index dataset, \code{df1} in
+\item{data1}{First data frame (typically the case/index dataset, \code{data_x} in
 \code{murmuration()}).}
 
 \item{data2}{Second data frame (typically the vaccination/hospitalisation dataset,
-\code{df2} in \code{murmuration()}).}
+\code{data_y} in \code{murmuration()}).}
 
 \item{linkage_vars}{Character vector of column names that will be used as
 \code{compare_vars} in \code{murmuration()}. These are the variables

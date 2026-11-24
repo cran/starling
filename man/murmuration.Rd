@@ -5,33 +5,44 @@
 \title{Links case, hospital, outbreak, event linelists, vaccination datasets}
 \usage{
 murmuration(
-  df1,
-  df2,
+  data_x,
+  data_y,
   linkage_type = NULL,
   event_type = NULL,
   method = "probabilistic",
   event_date = NULL,
   id_var,
-  blocking_var,
-  compare_vars,
-  threshold_value = 17,
+  blocking_var = NULL,
+  compare_vars = NULL,
+  threshold_value = 16,
   perch_before_linking = FALSE,
+  inspect_matches = FALSE,
+  inspect_extra_vars = NULL,
+  resume_from_pairs = NULL,
   vax_window = list(days_before = 14, days_after = 0, lookback_days = Inf),
   cohort_window = NULL,
   days_allowed_before_event = 7,
   days_allowed_after_event = 14,
   one_row_per_person = TRUE,
   clean_eggs = TRUE,
+  prefix = NULL,
+  suffix = NULL,
   days_between_onset_death = 30,
-  last_follow_up = NULL
+  last_follow_up = NULL,
+  keep_pairs_pred = FALSE
 )
 }
 \arguments{
-\item{df1}{This is a dataframe object, cleaned using clean_the_nest, and would often represent the base, or "x" dataset (when doing left joins).
+\item{data_x}{This is a dataframe object, cleaned using clean_the_nest, and would often represent the base, or "x" dataset (when doing left joins).
 Typically this would be a dataset of cases, have enough data to create linkages, and have event dates (e.g., onset_date).}
 
-\item{df2}{This is a dataframe object, cleaned using clean_the_nest, and would often represent the admissions or vaccination dataset ("y" dataset when doing left joins).
-Typically this would have enough data to create linkages, and include either admission data or vaccination event data (e.g. Australian Immunization Register).}
+\item{data_y}{This is a dataframe object, cleaned using clean_the_nest, and would often represent the admissions or vaccination dataset ("y" dataset when doing left joins).
+Typically this would have enough data to create linkages, and include either admission data or vaccination event data (e.g. Australian Immunization Register).
+\code{data_x}/\code{data_y} deliberately match the \code{.x}/\code{.y} suffixes
+\pkg{reclin2}'s own \code{link()} applies to any colliding column name (including
+\code{id_var} itself — see \code{id_var}\code{_y} in \code{@return} below): the naming
+here isn't arbitrary, it's the same x/y distinction the join engine itself already
+uses internally.}
 
 \item{linkage_type}{The linkage to perform. As of starling 1.1.0 the preferred
   value is \code{"cohort2event"} — a single, explicit linkage concept: link a
@@ -43,20 +54,21 @@ Typically this would have enough data to create linkages, and include either adm
   the cohort's follow-up, governed by \code{vax_window} (event-relative) or
   \code{cohort_window} (calendar).
 
-  \strong{Legacy codes (deprecated, still functional)}: the historical
-  \code{"c2h"}/\code{"v2c"}/\code{"v2h"}/\code{"v2e"} tokens still work and route
+  \strong{Legacy codes}: \code{"c2h"} and \code{"v2c"} still work and route
   identically, but emit a deprecation warning nudging to the collapsed form:
   \code{"c2h"} (cases->hospitalisations) becomes \code{event_type =
-  "hospitalisation"}; \code{"v2c"}/\code{"v2h"} (->vaccination history) become
-  \code{event_type = "vaccination"}; \code{"v2e"} (fixed-date event) becomes
-  \code{event_type = "vaccination"} with a scalar \code{Date} passed to
-  \code{event_date}. If \code{NULL} (default), \code{"c2h"} is assumed for
-  backwards compatibility. When linking to a vaccination dataset, use a single
+  "hospitalisation"}; \code{"v2c"} (->vaccination history) becomes
+  \code{event_type = "vaccination"}. \code{"v2h"} and \code{"v2e"} are
+  \strong{defunct} (an error naming the replacement): \code{"v2h"} was
+  \code{event_type = "vaccination"} with hospitalisations as data_x, and
+  \code{"v2e"} is \code{event_type = "vaccination"} with a scalar \code{Date}
+  passed to \code{event_date}. If \code{NULL} (default), \code{"c2h"} is assumed
+  for backwards compatibility. When linking to a vaccination dataset, use a single
   row per person (run the vaccination data through \code{clean_the_nest()} with
   \code{lie_nest_flat = TRUE}).}
 
 \item{event_type}{Required when \code{linkage_type = "cohort2event"}: names the
-event stream in df2. One of \code{"vaccination"}, \code{"hospitalisation"}
+event stream in data_y. One of \code{"vaccination"}, \code{"hospitalisation"}
 (\code{"hospitalization"} also accepted), or \code{"case"}. Ignored (with the
 routing inferred from the code) when a legacy \code{linkage_type} is supplied.}
 
@@ -70,17 +82,17 @@ you have a clean, reliable composite key (e.g. full name + date of birth, as in
 Smoll et al. 2023) and want reproducible, explainable, threshold-free links.
 Under \code{"deterministic"}: \code{weights} is \code{NA} (no composite score
 exists), \code{threshold_value}/\code{perch_before_linking} are ignored, and a
-non-unique key in df2 emits a message rather than silently resolving. All
+non-unique key in data_y emits a message rather than silently resolving. All
 linkage types and both window mechanisms work under either method.}
 
 \item{event_date}{The anchor date used to define the linkage window and determine valid vaccinations or related admissions.
 \itemize{
-  \item For \code{"c2h"}, \code{"v2c"}, and \code{"v2h"}: a character string naming any date column present in df1.
+  \item Usually: a character string naming any date column present in data_x.
     Any date column produced by \code{mudnester::clean_the_nest()} is valid here — not just \code{"onset_date"} or
     \code{"admission_date"}. In birth-cohort or coverage studies, pass \code{"cohort_entry_date"} to anchor
     the vaccination window from the start of follow-up, or \code{"cohort_exit_date"} to bound from the end.
     Examples: \code{"onset_date"}, \code{"admission_date"}, \code{"cohort_entry_date"}, \code{"cohort_exit_date"}.
-  \item For \code{"v2e"}: a \code{Date} object (e.g., \code{as.Date("2024-12-15")}) representing a fixed
+  \item For a fixed-date event (\code{event_type = "vaccination"} only): a single \code{Date} object (e.g., \code{as.Date("2024-12-15")}) representing a fixed
     event date shared across all records (e.g. a flight, an outbreak event).
 }
 This parameter is critical for determining valid vaccinations (must occur before \code{event_date - days_allowed_before_event})
@@ -93,18 +105,28 @@ Use \code{flock()} to automatically construct up to three blocking variables
 (coarse, medium, fine) from standardised linkage fields — it produces columns named
 \code{block1}, \code{block2}, \code{block3} by default. You can also create your own.
 Choose a broader/looser variable (e.g. gender) for small datasets or low data quality,
-and a finer variable (e.g. postcode + DOB year) for large, high-quality datasets.}
+and a finer variable (e.g. postcode + DOB year) for large, high-quality datasets.
+Required unless \code{resume_from_pairs} is used, in which case blocking has already
+happened and this is ignored.}
 
-\item{compare_vars}{Vector of variables. Used to compare variables between each dataset and calculate the string score differences. Typically names, dates of births and medicare/social security numbers.}
+\item{compare_vars}{Vector of variables. Used to compare variables between each dataset and calculate the string score differences. Typically names, dates of births and medicare/social security numbers.
+Required unless \code{resume_from_pairs} is used, in which case comparing has already
+happened and this is ignored.}
 
-\item{threshold_value}{Numeric (e.g. 17), default is 17. This is the Fellegi-Sunter
-log-likelihood ratio score above which a pair is classified as a match. The score is
+\item{threshold_value}{Numeric, default 16. The Fellegi-Sunter log-likelihood
+ratio score at or above which a pair is classified as a match. The score is
 \strong{dataset-specific} — there is no universal correct value.
-Use \code{murmuration_plot()} to inspect your score distribution and select a threshold
-that sits in the natural valley between the match and non-match peaks.
+Use \code{\link{murmuration_plot}} to inspect your score distribution and select a
+threshold that sits in the natural valley between the match and non-match peaks — pass
+this function's own return value straight into it (call this function with
+\code{keep_pairs_pred = TRUE} first; see that argument), no need to re-derive the pairs table.
 Higher values increase specificity (fewer false links); lower values increase sensitivity
-(fewer missed true matches). Typical working ranges against SCPHU datasets with 4-5
-comparison variables: conservative ~20-25; balanced ~15-20; sensitive ~10-14.}
+(fewer missed true matches). \strong{The default of 16 assumes 5 \code{compare_vars}
+with an agreeing Medicare number} (see "On threshold selection" above): with 3 or 4
+fields, or an incomplete Medicare field, the valley usually sits much lower. Re-derive
+the threshold via \code{\link{murmuration_plot}} whenever \code{compare_vars}' length
+changes — don't carry a threshold forward from a differently-sized comparison set (see
+Troubleshooting, cause 2, below).}
 
 \item{perch_before_linking}{Logical. If \code{TRUE}, calls \code{\link{perch}} on the
 scored pairs immediately after the EM algorithm fits and before the threshold is applied,
@@ -113,9 +135,41 @@ range. In interactive sessions the plot is also displayed. In non-interactive se
 (e.g. Quarto render, batch jobs) only the table is printed and execution continues
 automatically. Default \code{FALSE}.}
 
+\item{inspect_matches}{Logical. If \code{TRUE}, stops immediately after blocking and
+EM scoring and returns the full candidate-pairs table for manual review, instead of
+proceeding to threshold selection, \code{link()}, or any \code{linkage_type}-specific
+event-window filtering. Requires \code{method = "probabilistic"}. Unlike the plain
+\code{pairs_pred} attached elsewhere, this table has the actual \code{id_var} and
+\code{compare_vars} field values joined in from both sides (suffixed \code{.x}/\code{.y}),
+so a specific pair can be read and judged, not just indexed. A mechanical
+\code{threshold} column (\code{weights >= threshold_value}) and an empty
+\code{match_override} column (\code{NA}/\code{"match"}/\code{"non-match"}, for you to
+fill in on individual pairs after inspection) are included. \code{event_date} is not
+required when this is \code{TRUE}, since the event-window stage that needs it is never
+reached. Pass the result straight to \code{\link{murmuration_plot}} to see the score
+distribution. Default \code{FALSE}.}
+
+\item{inspect_extra_vars}{Character vector of additional column names (present in both
+\code{data_x} and \code{data_y}) to join into the \code{inspect_matches} review table beyond
+\code{id_var} and \code{compare_vars} -- e.g. a field you want visible for context while
+reviewing but did not include in the linkage key itself. Ignored unless
+\code{inspect_matches = TRUE}. Default \code{NULL}.}
+
+\item{resume_from_pairs}{A reviewed pairs table -- normally the object returned by
+\code{murmuration(inspect_matches = TRUE)}, optionally with its \code{match_override}
+column edited (\code{NA}/\code{"match"}/\code{"non-match"}) -- to resume the linkage
+from, skipping blocking, comparing, and EM-fitting entirely. \code{blocking_var} and
+\code{compare_vars} are not needed in this mode. \code{data_x}/\code{data_y} must be the
+exact same data frames used to produce it (a row-count check guards against an
+obvious mismatch, but cannot catch every case) -- \code{.x}/\code{.y} are row indices
+into them. Mutually exclusive with \code{inspect_matches}. \code{threshold_value}
+still applies here, to any pair whose \code{match_override} is \code{NA} -- it does
+not have to match what was used when \code{inspect_matches} built this table.
+Default \code{NULL}.}
+
 \item{vax_window}{A named list defining the vaccination validity window relative
-  to \code{event_date}. Used for all vaccination linkage types (\code{"v2c"},
-  \code{"v2h"}, \code{"v2e"}). Contains up to three elements:
+  to \code{event_date}. Used for every vaccination linkage
+  (\code{event_type = "vaccination"}). Contains up to three elements:
   \describe{
     \item{\code{days_before}}{Minimum days \emph{before} \code{event_date} a vaccine
       must have been administered to count as prior valid exposure. Vaccines administered
@@ -127,9 +181,10 @@ automatically. Default \code{FALSE}.}
       a vaccination record. Default \code{0} (no post-event vaccinations retained).
       Set to a positive value to capture post-event vaccination -- useful for studying
       vaccination uptake following a diagnosis or intervention (e.g. 365 to capture
-      all vaccinations in the year after diagnosis). Post-event vaccinations are
-      flagged with a new \code{vax_timing} column (\code{"pre_event"} or
-      \code{"post_event"}) so they can be analysed separately downstream.}
+      all vaccinations in the year after diagnosis). Post-event doses are kept
+      in the \code{vax_date_<n>} columns like any other valid dose; compare them
+      with \code{event_date} downstream if pre- and post-event doses need
+      separating.}
     \item{\code{lookback_days}}{Maximum days \emph{before} \code{event_date} to look
       back for valid vaccinations. Default \code{Inf} (no upper lookback limit --
       any prior vaccination regardless of age counts). Set to \code{365} to restrict
@@ -180,16 +235,104 @@ for those.}
 \item{one_row_per_person}{Logical (TRUE or FALSE) with the default being TRUE. It will take multiple admissions per person, and create a series of variables prefixed with "first_", such as "first_admission_date",
 and put into a single row all admission events, and create a series of variables suffixed with "s", such as "admission_dates". Will work with single admissions per person.}
 
-\item{clean_eggs}{Logical (TRUE or FALSE) with the default being TRUE. Drops all the .y variables that are duplicates of the second dataset (df2), and keeps the variables and removes the .x from df1. If you leave this on, many,
+\item{clean_eggs}{Logical (TRUE or FALSE) with the default being TRUE. Drops all the .y variables that are duplicates of the second dataset (data_y), and keeps the variables and removes the .x from data_x. If you leave this on, many,
 if not most variables will have ".x" or ".y" attached to them (e.g. gender) and thus keep this as TRUE for default, and FALSE if you want to check the linkages are true and working.}
+
+\item{prefix, suffix}{Character or \code{NULL} (default \code{NULL} for both --
+  every existing call is unaffected unless you supply one). Text added to every
+  column \code{murmuration()} contributes from \code{data_y} or computes about the
+  link itself (\code{weights}, \code{threshold}, and every derived column the
+  relevant \code{linkage_type} block produces -- e.g. \code{vaccination_status},
+  \code{total_vax}, \code{first_vax_date}, \code{first_vax_type},
+  \code{last_vax_date}, \code{last_vax_type}, a colliding identifier from
+  \code{data_y}'s side). \code{data_x}'s own columns are never touched -- \code{id_var}
+  in particular stays plain and stable, which is what makes it a reliable join
+  key afterwards. If both are supplied, prefix is applied first, then suffix.
+
+  Built for linking one origin dataset against several separate event-stream
+  datasets in independent calls -- e.g. a cohort against flu, COVID, RSV, and
+  shingles vaccination registries -- where every call would otherwise produce
+  the same generic column names (\code{weights}, \code{vaccination_status}, ...)
+  and collide the moment you try to combine the results:
+  \preformatted{
+  flu_linked   <- murmuration(cohort, flu_vax,   ..., suffix = "_flu")
+  covid_linked <- murmuration(cohort, covid_vax, ..., suffix = "_covid")
+  rsv_linked   <- murmuration(cohort, rsv_vax,   ..., suffix = "_rsv")
+
+  master <- cohort |>
+    dplyr::left_join(dplyr::select(flu_linked,   id_var, ends_with("_flu")),   by = "id_var") |>
+    dplyr::left_join(dplyr::select(covid_linked, id_var, ends_with("_covid")), by = "id_var") |>
+    dplyr::left_join(dplyr::select(rsv_linked,   id_var, ends_with("_rsv")),   by = "id_var")
+  }
+  No manual \code{select()}/\code{rename()} step is needed between each
+  \code{murmuration()} call and the join, and each call stays fully independent
+  -- none of them ever needs a previous call's result as input, so there is
+  nothing accumulated for column names to collide with in the first place.}
 
 \item{days_between_onset_death}{Numeric (e.g. "30"). If you have put a date of death into the clean_the_nest command (which will rename it to dod), then the command will find disease related dates of death.
 This is chosen number of days between event_date and death for a disease-related death. Often this may be 30 days for SARS-CoV-2 or can be much longer for HIV. If you don't want an upper limit, use "9999".}
 
 \item{last_follow_up}{Represents a date (input as ymd(2024-11-22)) that represents last follow-up. This could be the latest admission date of a dataset. Used for calculating survival time.}
+
+\item{keep_pairs_pred}{Logical. If \code{TRUE}, attach the full candidate-pairs
+scoring table as \code{attr(x, "pairs_pred")} on the returned data frame (see
+\code{@return} below) -- needed for \code{\link{murmuration_plot}}'s score
+distribution, or for pulling the table out directly. Default \code{FALSE}:
+OPT-IN, not opt-out. This table is every candidate pair blocking produced,
+before thresholding -- confirmed in practice to reach tens of millions of
+rows for a single call against a large \code{data_y}, and it is serialised in
+full by \code{saveRDS()} along with everything else on the returned object,
+not just held in memory for the duration of the call. Leave at \code{FALSE}
+unless you specifically need \code{murmuration_plot()} or
+\code{attr(x, "pairs_pred")} for THIS call -- re-run just that one call with
+\code{keep_pairs_pred = TRUE} when you do, rather than defaulting it on
+everywhere. Does not affect \code{inspect_matches = TRUE}, which already
+returns the full pairs table directly as its return value -- an
+already-explicit request, not governed by this argument.}
 }
 \value{
-A linked dataset with some new variables.
+A linked dataset with some new variables. When \code{method = "probabilistic"},
+  linkage metadata travels with the returned data frame as
+  attributes, so \code{\link{murmuration_plot}} can be called directly on it with no
+  need to re-derive anything via \pkg{reclin2} -- except \code{pairs_pred} itself,
+  which is only attached when \code{keep_pairs_pred = TRUE} (default \code{FALSE},
+  see that argument above):
+  \describe{
+    \item{\code{attr(x, "pairs_pred")}}{Only present when \code{keep_pairs_pred = TRUE}
+      was passed to this call; \code{NULL} otherwise (the new default). The full
+      candidate-pairs scoring table (every
+      compared pair, not just the ones that cleared \code{threshold_value}), with the
+      realised \code{blocking_var} value joined on for each pair.}
+    \item{\code{attr(x, "blocking_var")}}{The \code{blocking_var} value actually used.}
+    \item{\code{attr(x, "threshold_value")}}{The \code{threshold_value} actually used.}
+    \item{\code{attr(x, "murmuration_method")}}{\code{"probabilistic"} or
+      \code{"deterministic"}.}
+  }
+  Under \code{method = "deterministic"}, \code{pairs_pred} is \code{NULL} and
+  \code{blocking_var}/\code{threshold_value} are \code{NA}: there is no Fellegi-Sunter
+  score to inspect (deterministic linkage is threshold-free by design -- see
+  \code{method} above).
+
+  \strong{When \code{inspect_matches = TRUE}}, the return shape is different: instead of
+  a linked dataset, you get the candidate-pairs table itself (see \code{inspect_matches}
+  above) -- there is no linked \code{df} yet, because threshold selection and any
+  event-window filtering have not run. The same four attributes are still attached
+  directly to this table (not nested under a separate \code{pairs_pred} attribute, since
+  the returned object already \emph{is} that table).
+
+  \strong{\code{<id_var>_y}} (corrected this revision -- previously the fixed literal
+  \code{"id_var_df2"}, and \code{"c2h"}-only; now dynamically named the same way
+  \code{id_x_col}/\code{id_y_col} are internally, and consistent across all four
+  \code{linkage_type} routes): the matched \code{data_y} record's own \code{id_var}
+  value, one row per person after the \code{one_row_per_person} collapse -- e.g.
+  \code{id_var = "identity"} produces a column literally named \code{identity_y}.
+  \code{NA} for a \code{data_x} row with no above-threshold match. This is the only
+  trace of \emph{which specific data_y record} a person matched to that survives
+  \code{clean_eggs = TRUE} (the default) -- every other \code{.y}-suffixed column
+  from \code{data_y} is dropped by that step, by design. Keep it if you need an
+  audit trail back to a specific vaccination dose or hospital admission record;
+  otherwise it's safe to ignore alongside the domain-specific derived columns
+  (\code{vaccination_status}, \code{first_admission_date}, ...).
 }
 \description{
 **Bird note**: A murmuration is one of nature's most arresting phenomena: tens
@@ -227,29 +370,171 @@ The recommended pre-linkage workflow is:
  \item \code{linkage_quality()} to run a structured battery of pre-linkage quality checks across both datasets (completeness, duplicates, Medicare validity, date plausibility, gender and DOB year distribution).
  \item \code{\link{check_medicare}} to validate Medicare check digits and flag invalid numbers before they enter comparison scoring.
  \item \code{flock()} to create up to three blocking variables at different specificity levels (coarse, medium, fine) — pass one to the \code{blocking_var} argument below.
- \item \code{\link{murmuration}} with linkage_type="v2c" to link cases to vaccination data.
- \item \code{\link{murmuration}} with linkage_type="v2h" to link a v2c dataset to hospitalization data. Or skip linking to case data, and just build a v2h dataset for test-negative case-control studies.
- \item \code{\link{murmuration}} with linkage_type="v2e" to link event linelists (flight manifests, outbreak investigations) to vaccination history.
- \item \code{murmuration_plot()} to visualise the full linkage score distribution and confirm the threshold before accepting the linked dataset.
+ \item \code{\link{murmuration}} with \code{linkage_type = "cohort2event", event_type = "vaccination"} to link cases (or any cohort -- hospitalisations for a test-negative design, a birth cohort) to vaccination data, anchored on a date column of data_x.
+ \item \code{\link{murmuration}} with \code{linkage_type = "cohort2event", event_type = "hospitalisation"} to link cases to hospital admissions.
+ \item \code{\link{murmuration}} with \code{linkage_type = "cohort2event", event_type = "vaccination"} and a single \code{Date} as \code{event_date} to link event linelists (flight manifests, outbreak investigations) to vaccination history as at that date.
+ \item \code{\link{murmuration_plot}}, called directly on this function's own return value (pass \code{keep_pairs_pred = TRUE} to the \code{\link{murmuration}} call above first — default \code{FALSE} skips building this table), to visualise the full linkage score distribution (jittered by \code{blocking_var}) and confirm the threshold before accepting the linked dataset. No need to re-derive the pairs table via \pkg{reclin2} yourself.
  \item \code{mudnester::preening()} to prettify the dataframe prepping it for exploration, analysis and presentation. Great to use with \code{gtsummary::tbl_summary()}.
 }
 
 ## On threshold selection
 The \code{threshold_value} is a Fellegi-Sunter log-likelihood ratio score and is
-\strong{dataset-specific} — there is no universal correct value. The default of 17 was
-chosen empirically against SCPHU datasets with 4-5 comparison variables (names, DOB,
-Medicare, gender). Use \code{flock_plot()} to inspect the bimodal score distribution
-from your specific dataset and identify the natural valley between the match and
-non-match peaks. Typical working ranges: conservative (high specificity) ~20-25;
-balanced (default) ~15-20; sensitive (high recall) ~10-14.
+\strong{dataset-specific} — there is no universal correct value. The default of 16 is
+calibrated against SCPHU datasets with 5 comparison variables (first name, last name,
+date of birth, Medicare number and gender or postcode) where the Medicare number is
+present and current on both sides. Use \code{\link{murmuration_plot}} (after calling
+this function with \code{keep_pairs_pred = TRUE}) to inspect the bimodal score
+distribution from your specific dataset and identify the natural valley between the
+match and non-match peaks. Typical working ranges: conservative (high specificity)
+about 20-25; balanced (default) about 14-18; sensitive (high recall)
+about 8-13.
+
+\strong{Reminder}: 16 is calibrated for 5 \code{compare_vars} with an agreeing Medicare
+number -- it is not a safe default otherwise. Fewer variables (e.g. AIR-style
+vaccination extracts with no address field, often down to 3) structurally cap the
+achievable weight below what 16 assumes, which reads as "zero links" even when the
+underlying data is fine. A Medicare number that is missing on one side, or recorded
+from an older card (the 10th digit is the card issue number and changes every time a
+card is replaced), removes most of that field's weight, so those true matches form a
+second, lower cluster that 16 can cut off entirely -- see
+\code{vignette("threshold-selection", package = "starling")}, which measures recall
+for 3, 4 and 5 comparison variables. Comparing on \code{medicare09} (account plus
+check digit) instead of \code{medicare10} avoids the card-issue penalty. Treat a change
+in \code{compare_vars} -- or in how complete your Medicare field is -- as a reason to
+re-plot and re-choose the threshold, not just a reason to re-run the same call.
+
+## Phonetic-key deterministic matching
+\code{method = "deterministic"} requires every \code{compare_vars} field to match
+\emph{exactly} — by design, it has no tolerance for typos or transcription variants
+the way \code{method = "probabilistic"} does. A common way to add tolerance back in,
+without moving to probabilistic scoring at all, is to match on a \strong{phonetic
+code} instead of the literal string: "Smith"/"Smyth" or "Catherine"/"Kathryn"
+produce the same Soundex/Metaphone code even though the literal strings differ, so
+an exact match on the \emph{code} tolerates exactly this kind of spelling variation
+while remaining fully deterministic — no scoring, no threshold, same as any other
+deterministic key.
+
+This needs \strong{no change to \code{murmuration()} itself} — \code{\link{flock}()}
+already generates the phonetic codes required, via its \code{phonetic_vars}/
+\code{phonetic_method = "soundex"} or \code{"metaphone"} arguments, appending a
+\code{<col>_soundex}/\code{<col>_metaphone} column. Prepare both datasets before
+calling this function, then compare on the phonetic column instead of the literal
+name field:
+\preformatted{
+data_x_phon <- flock(data_x, phonetic_vars = c("lettername1", "lettername2"),
+                   phonetic_method = "metaphone")
+data_y_phon <- flock(data_y, phonetic_vars = c("lettername1", "lettername2"),
+                   phonetic_method = "metaphone")
+
+murmuration(data_x_phon, data_y_phon,
+  method       = "deterministic",
+  compare_vars = c("lettername1_metaphone", "lettername2_metaphone", "dob"),
+  ...)
+}
+Double Metaphone is generally preferred over Soundex when initial-letter/sound
+variation is common, since Soundex keeps the first letter of the string literal —
+see \code{\link{flock}}'s own documentation for the full comparison.
+
+This trades precision for recall in a specific, controllable way: it will now count
+"Smith"/"Smyth" as identical, but it will \emph{also} count some genuinely different
+names that happen to share a phonetic code as identical (both Soundex and Metaphone
+have known false-positive pairs). Reserve it for fields where transcription
+variation is the dominant error mode you're trying to catch, not as a general
+replacement for exact matching across every field — most linkages benefit from
+phonetic tolerance on \emph{name} fields specifically, while keeping
+\code{dob}/\code{postcode}/\code{medicare} as ordinary exact matches. See Example 11
+below for a complete worked version.
+
+## Linking one cohort to several event streams
+A common design is linking a single origin dataset (a cohort, a dialysis register, a
+birth cohort) against several \emph{separate} event-stream datasets in independent
+calls — one call per vaccine type, for instance, rather than one call with several
+events mixed together. Every call produces the same generic column names
+(\code{weights}, \code{vaccination_status}, \code{total_vax}, ...) regardless of which
+event stream it linked, which collide the moment more than one call's result needs to
+sit in the same data frame. \code{prefix}/\code{suffix} solve this at the source — see
+their documentation below and Example 9 — rather than requiring a manual
+\code{select()}/\code{rename()} pass on each call's output before joining. Keep each
+call independent (against the origin dataset directly, never chaining one call's
+result into the next as \code{data_x}) and combine the results afterwards with
+\code{dplyr::left_join()} on \code{id_var}, which \code{prefix}/\code{suffix} never
+touch.
+
+## Troubleshooting: zero (or unexpectedly few) links
+Five real, previously-encountered causes, not a theoretical list. The first three
+affect the \emph{score} a genuine pair receives; the fourth stops candidate pairs
+from being formed at all, upstream of scoring; the fifth is specific to
+vaccination-type linkage. Run \code{\link{preflight}} before linking — it catches
+most of causes 1 and 3 up front. After linking, \code{keep_pairs_pred = TRUE} plus
+\code{\link{murmuration_plot}} (or a bare \code{summary(attr(x, "pairs_pred")$weights)})
+tells you which kind of zero you have: a \strong{scoring} problem (plenty of candidate
+pairs, none score high enough) or a \strong{blocking} problem (almost no candidates
+exist to begin with) — the fix is different for each.
+\enumerate{
+  \item \strong{Letter-name fields swapped between \code{data_x} and \code{data_y}.} If one
+    dataset's \code{mudnester::clean_the_nest()} call maps \code{lettername1} to first name
+    and \code{lettername2} to last name, and the other dataset has them the other way
+    around, every comparison is first-name-to-last-name and vice versa — structurally
+    never a match, however clean the underlying data actually is. Each side looks
+    correct in isolation (it's internally consistent), so this doesn't surface until
+    the two \code{clean_the_nest()} calls are checked side by side, field mapping by
+    field mapping.
+  \item \strong{Too few \code{compare_vars} for the \code{threshold_value} in use.} The
+    maximum achievable Fellegi-Sunter weight rises with the number of comparison
+    fields — a threshold calibrated against 5 \code{compare_vars} (this function's
+    default of \code{16} assumes that many) is often unreachable with 3 or 4,
+    since AIR-style vaccination extracts frequently have no address field to compare.
+    The console output naming this exact combination is "Pairs selected
+    (threshold=TRUE): 0" against a large candidate-pair count — that pairing means the
+    threshold, not the data, is the problem. Lower \code{threshold_value} and
+    re-inspect with \code{\link{murmuration_plot}} rather than concluding the linkage
+    itself failed.
+  \item \strong{Inconsistent cleaning/encoding between \code{data_x} and \code{data_y}.} Two
+    records that are obviously the same person to a human don't match if one side has
+    \code{gender = "M"/"F"} and the other \code{"Male"/"Female"}, or one side's
+    postcode is numeric and the other's is a zero-padded string. This degrades both
+    \code{compare_vars} scoring (cause 2 above) and \code{blocking_var} alignment
+    (cause 4 below) at once, since both are built from the same cleaned fields.
+  \item \strong{\code{blocking_var} doesn't mean the same thing on both sides.}
+    Blocking keys are literal string concatenations — a block built as
+    \code{gender + postcode} on \code{data_x} and \code{gender + dob_yr} on \code{data_y}
+    (or the "same" block built by two \code{\link{flock}()} calls whose inputs quietly
+    drifted apart over time) never places a true pair in the same block, so they are
+    never even compared, let alone scored. This is a \emph{candidate-formation}
+    problem, not a scoring one — \code{keep_pairs_pred = TRUE} shows a near-zero
+    candidate-pair count, not just a low-scoring one. A \code{blocking_var} that's too
+    fine-grained on its own (e.g. exact \code{dob} with no coarser fallback) produces
+    the identical symptom for a different reason: every block ends up with exactly one
+    row per side, so there's nothing for a true pair to be compared against.
+  \item \strong{Vaccination data left in long (one-row-per-dose) format.}
+    \code{clean_the_nest(data_type = "vaccination")} does not pivot to
+    \code{vax_date_1}/\code{vax_type_1}, ... on its own — \code{lie_nest_flat = TRUE}
+    is required. Without it, the data passes through unpivoted with no error from
+    \code{clean_the_nest()} itself; the failure only surfaces here, silently, as a
+    vaccination-type (\code{event_type = "vaccination"}) linkage that never finds the
+    columns it looks for.
+}
 }
 \note{
 Ensure there are no missing vaccination dates in vaccination dataset prior to murmuration. Murmuration requires complete vaccination data (equal date and type columns per observation) to achieve correct matching of vaccination columns.
 If there are too few variables to match on, then matching will not work well. For example, if you have first name, last name and date of birth, and a very large dataset (Immunization Register), then the scoring will not differentiate true from false matches. Consider deterministic linkage when there is a paucity of information to use to derive linkage scores.
 }
 \examples{
+# All eleven examples below are kept as \dontrun{} rather than \donttest{}
+# (aviary ecosystem plan \S8.9.2): each illustrates a distinct calling
+# convention (linkage_type/event_type routing, threshold selection,
+# manual pair review, multi-registry linking) against realistically
+# multi-hundred-row blocking -- the score-distribution and threshold
+# behaviour these are actually meant to show does not survive shrinking
+# to a handful of synthetic rows small enough to embed here, and several
+# depend on \pkg{reclin2}'s full pair_blocking()/problink_em() pipeline
+# rather than the simpler deterministic exact-join path. See
+# \code{\link{murmuration_plot}} for a genuinely runnable \donttest{}
+# example against this same package's plotting function.
 \dontrun{
-# Example 1: Link cases to vaccination history (onset_date as anchor)
+# Example 1: Link cases to vaccination history (onset_date as anchor),
+# using the current preferred interface (linkage_type = "cohort2event" +
+# event_type) introduced in starling 1.1.0.
 dx_clean <- clean_the_nest(dx_data,
   data_type = "cases",
   id_var = "identity",
@@ -274,13 +559,16 @@ vax_clean <- clean_the_nest(vax_data,
   vax_type = "vaccine_delivered",
   vax_date = "service_date")
 
-df1 <- murmuration(dx_clean, vax_clean,
-  linkage_type = "v2c",
+data_x <- murmuration(dx_clean, vax_clean,
+  linkage_type = "cohort2event",
+  event_type   = "vaccination",
   event_date = "onset_date",
   id_var = "identity",
   blocking_var = "gender",
   compare_vars = c("lettername1", "lettername2", "dob"),
   clean_eggs = FALSE)
+# Legacy equivalent (still works, but emits a deprecation warning):
+#   murmuration(dx_clean, vax_clean, linkage_type = "v2c", ...)
 
 # Example 2: Link hospitalization data to vaccination history (admission_date as anchor)
 hosp_clean <- clean_the_nest(hosp_data,
@@ -295,29 +583,53 @@ hosp_clean <- clean_the_nest(hosp_data,
   admission_date = "date_of_admission",
   discharge_date = "date_of_discharge")
 
-df2 <- murmuration(hosp_clean, vax_clean,
-  linkage_type = "v2h",
+data_y <- murmuration(hosp_clean, vax_clean,
+  linkage_type = "cohort2event",
+  event_type   = "vaccination",
   event_date = "admission_date",
   id_var = "patient_id",
   blocking_var = "gender",
   compare_vars = c("lettername1", "lettername2", "medicare10", "dob"),
   clean_eggs = FALSE,
   one_row_per_person = TRUE)
+# The hospitalisations are simply the cohort here (data_x); this replaces the
+# defunct linkage_type = "v2h".
 
-# Example 3: Link cases to hospitalisations (onset_date as anchor)
-df3 <- murmuration(dx_clean, hosp_clean,
-  linkage_type = "c2h",
+# Example 3: Link cases to hospitalisations (onset_date as anchor) --
+# method = "deterministic" reproducing Smoll et al. 2023's exact linkage
+# recipe (see @references): full first name, full last name, and date of
+# birth, linking 1 Jan-31 Mar 2022 NOCS PCR results to Central Queensland
+# hospital admissions. The paper defines a COVID-19-related admission as
+# ICD-10-AM B97.2 within 30 days of diagnosis (no pre-diagnosis allowance
+# is described in the paper, hence days_allowed_before_event = 0 here --
+# widen this if your own admissions data can genuinely precede diagnosis,
+# e.g. a PCR test taken during an already-in-progress admission).
+# Reported result: 47/9,682 adults hospitalised (0.48\%); vaccine
+# effectiveness 69.9\% for a primary course alone, 81.8\% with a booster.
+det_linked <- murmuration(dx_clean, hosp_clean,
+  linkage_type = "cohort2event",
+  event_type   = "hospitalisation",
+  method       = "deterministic",
   event_date = "onset_date",
   id_var = "identity",
   blocking_var = "postcode",
-  compare_vars = c("lettername1", "lettername2", "dob", "medicare10"),
-  days_allowed_before_event = 7,
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  days_allowed_before_event = 0,
   days_allowed_after_event = 30,
   clean_eggs = FALSE)
+# Legacy equivalent (still works, but emits a deprecation warning):
+#   murmuration(dx_clean, hosp_clean, linkage_type = "c2h", method = "deterministic", ...)
 
-# Example 4: Birth-cohort study (e.g. RICOR nirsevimab) — cohort_window approach.
-# Captures any vaccination administered during the defined follow-up period,
-# regardless of individual event dates.
+# Example 4: Birth-cohort study — cohort_window approach, reproducing the
+# observation window of Roughan et al. 2026 (see @references): all 5,116
+# infants born at Sunshine Coast University Hospital, 1 May 2024-31 Oct
+# 2025. Captures any vaccination administered during the defined follow-up
+# period, regardless of individual event dates. That study resolved its
+# messier ~10\% of birth-register records (identifier/DOB errors) with
+# weighted-score matching rather than an exact key -- exactly the case
+# method = "probabilistic" (and murmuration_plot(), Example 7 below) is
+# built to support. Reported result: 71.7\% (3,669/5,116) received valid
+# RSV immunisation.
 cohort_clean <- clean_the_nest(birth_cohort_data,
   data_type = "cases",
   id_var = "baby_id",
@@ -327,14 +639,15 @@ cohort_clean <- clean_the_nest(birth_cohort_data,
   gender = "sex")
 
 df_cohort <- murmuration(cohort_clean, vax_clean,
-  linkage_type  = "v2c",
+  linkage_type  = "cohort2event",
+  event_type    = "vaccination",
   event_date    = "dob",
   id_var        = "baby_id",
   blocking_var  = "gender",
   compare_vars  = c("lettername1", "lettername2", "dob"),
   cohort_window = list(
-    entry = as.Date("2023-01-01"),
-    exit  = as.Date("2024-06-30")
+    entry = as.Date("2024-05-01"),
+    exit  = as.Date("2025-10-31")
   ),
   clean_eggs = FALSE)
 
@@ -355,8 +668,8 @@ df_flu_ve <- murmuration(cases_clean, vax_clean,
   clean_eggs = FALSE)
 
 # Example 4c: Post-diagnosis vaccination uptake study.
-# Retains vaccinations up to 1 year AFTER diagnosis as well as valid prior doses.
-# The vax_timing column flags each dose as "pre_event" or "post_event".
+# Retains vaccinations up to 1 year AFTER diagnosis as well as valid prior doses;
+# compare each vax_date_<n> with onset_date to separate pre- from post-event doses.
 df_post_dx <- murmuration(cases_clean, vax_clean,
   linkage_type = "v2c",
   event_date   = "onset_date",
@@ -380,13 +693,15 @@ manifest_clean <- clean_the_nest(manifest_data,
   gender = "gender")
 
 df_flight <- murmuration(manifest_clean, vax_clean,
-  linkage_type = "v2e",
-  event_date = as.Date("2024-03-15"),
+  linkage_type = "cohort2event",
+  event_type   = "vaccination",
+  event_date = as.Date("2024-03-15"),   # a single Date: the fixed-date event path
   id_var = "passenger_id",
   blocking_var = "gender",
   compare_vars = c("lettername1", "lettername2", "dob"),
-  days_allowed_before_event = 14,
+  vax_window = list(days_before = 14, days_after = 0, lookback_days = Inf),
   clean_eggs = FALSE)
+# Replaces the defunct linkage_type = "v2e".
 
 # Example 6: Link outbreak linelist to vaccination history (fixed event Date object)
 linelist_clean <- clean_the_nest(linelist_data,
@@ -401,12 +716,207 @@ linelist_clean <- clean_the_nest(linelist_data,
   onset_date = "onset_date")
 
 df_outbreak <- murmuration(linelist_clean, vax_clean,
-  linkage_type = "v2e",
+  linkage_type = "cohort2event",
+  event_type   = "vaccination",
   event_date = as.Date("2024-06-01"),
   id_var = "case_id",
   blocking_var = "postcode",
   compare_vars = c("lettername1", "lettername2", "dob", "medicare10"),
-  days_allowed_before_event = 7,
+  vax_window = list(days_before = 7, days_after = 0, lookback_days = Inf),
   clean_eggs = FALSE)
+
+# Examples 7-9 below continue to use the legacy "v2c" code for brevity, since
+# the point of each is the surrounding workflow (threshold inspection, manual
+# review, multi-registry linking) rather than the linkage_type argument itself.
+# Substitute linkage_type = "cohort2event", event_type = "vaccination" in any
+# of them if you are starting a fresh script.
+
+# Example 7: Inspect the linkage score distribution before committing to a
+# threshold, in the spirit of Roughan et al. 2026 (@references) — that study
+# did not assume its composite key would always match exactly, and resolved
+# its messier ~10\% of birth-register records with weighted-score matching
+# instead.
+linked <- murmuration(cohort_clean, vax_clean,
+  linkage_type  = "v2c",
+  event_date    = "dob",
+  id_var        = "baby_id",
+  blocking_var  = "gender",
+  compare_vars  = c("lettername1", "lettername2", "dob"),
+  threshold_value = 16,
+  clean_eggs = FALSE,
+  keep_pairs_pred = TRUE)   # needed for murmuration_plot()/attr() below --
+                            # default FALSE would leave pairs_pred as NULL
+
+# murmuration_plot() runs directly off this return value — no need to hand-roll
+# the reclin2 pipeline (pair_blocking() -> compare_pairs() -> problink_em() ->
+# predict()) just to see the score distribution. threshold_value and
+# blocking_var are picked up automatically from attr(linked, ...).
+murmuration_plot(linked)
+
+# Try a different threshold without re-running murmuration():
+murmuration_plot(linked, threshold = 14)
+
+# The pairs-level scoring table is also available directly if you need it:
+pp <- attr(linked, "pairs_pred")
+
+# Example 8: Manual review of borderline pairs before finalising. Useful
+# when murmuration_plot() shows an above-threshold count that doesn't
+# match independent expectations (e.g. 79 candidate matches where only 76
+# are plausible) and you need to see WHICH pairs are in question, not just
+# how many.
+review <- murmuration(cohort_clean, vax_clean,
+  linkage_type  = "v2c",
+  id_var        = "baby_id",
+  blocking_var  = "gender",
+  compare_vars  = c("lettername1", "lettername2", "dob"),
+  threshold_value  = 16,
+  inspect_matches  = TRUE)   # event_date not needed for this mode
+
+murmuration_plot(review)   # same plot, run on the full candidate-pairs table
+
+# Pull out the above-threshold pairs with their identifying fields
+# (lettername1.x/.y, lettername2.x/.y, dob.x/.y, baby_id.x/.y) for a look:
+suspects <- review[review$threshold, ]
+
+# After eyeballing names/DOBs, record a manual decision on specific pairs:
+review$match_override[review$baby_id.x == "B0042" &
+                       review$baby_id.y == "V0917"] <- "non-match"
+
+# Finish the linkage, respecting that override. data_x/data_y must be the exact
+# same data frames used above -- .x/.y are row indices into them.
+linked <- murmuration(cohort_clean, vax_clean,
+  linkage_type      = "v2c",
+  id_var            = "baby_id",
+  event_date        = "dob",
+  threshold_value   = 16,
+  resume_from_pairs = review)
+
+# Example 9: Link one origin cohort against several separate vaccine
+# registries (flu, COVID, RSV), each call fully independent -- never
+# chaining one call's result into the next -- with suffix distinguishing
+# each call's contributed columns so the results can be joined back onto
+# the cohort without any manual select()/rename() step in between.
+flu_linked <- murmuration(dialysis_cohort, flu_vax,
+  linkage_type = "v2c", event_date = "onset_date", id_var = "id_var",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  suffix = "_flu")
+
+covid_linked <- murmuration(dialysis_cohort, covid_vax,
+  linkage_type = "v2c", event_date = "onset_date", id_var = "id_var",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  suffix = "_covid")
+
+rsv_linked <- murmuration(dialysis_cohort, rsv_vax,
+  linkage_type = "v2c", event_date = "onset_date", id_var = "id_var",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  suffix = "_rsv")
+
+# id_var is untouched by suffix on every call, so it's a stable join key
+master_linkage <- dialysis_cohort |>
+  dplyr::left_join(dplyr::select(flu_linked,   id_var, ends_with("_flu")),
+                    by = "id_var") |>
+  dplyr::left_join(dplyr::select(covid_linked, id_var, ends_with("_covid")),
+                    by = "id_var") |>
+  dplyr::left_join(dplyr::select(rsv_linked,   id_var, ends_with("_rsv")),
+                    by = "id_var")
+
+# Example 10: Link a birth cohort to its two separate RSV immunisation
+# pathways -- neonatal nirsevimab and antenatal Abrysvo -- reproducing the
+# two-pathway design of Roughan et al. 2026 (@references) as two independent
+# calls joined via id_var, following the multi-registry pattern in Example 9.
+# Reported result: of the 71.7\% of infants with valid RSV immunisation,
+# 45.2 percentage points came through nirsevimab only and 26.4 through
+# Abrysvo only.
+#
+# Abrysvo is only valid if given >= 14 days before delivery -- vax_window
+# captures that floor directly. The paper's additional 28-36-week-gestation
+# criterion is a property of the vaccination date itself, not of its distance
+# to event_date, so it is not something vax_window can express: check it as
+# a separate filter on vax_date/gestational_age after linkage.
+abrysvo_linked <- murmuration(cohort_clean, abrysvo_vax,
+  linkage_type = "cohort2event", event_type = "vaccination",
+  event_date   = "dob",
+  id_var       = "baby_id",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  vax_window   = list(days_before = 14, days_after = 0, lookback_days = 280),
+  suffix       = "_abrysvo")
+
+# Nirsevimab is only valid if given before hospital discharge; discharge
+# timing varies per infant, so this is approximated with a short fixed
+# post-birth window wide enough to cover a typical birth admission --
+# confirm against your own discharge_date field rather than relying on
+# this alone.
+nirsevimab_linked <- murmuration(cohort_clean, nirsevimab_vax,
+  linkage_type = "cohort2event", event_type = "vaccination",
+  event_date   = "dob",
+  id_var       = "baby_id",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  vax_window   = list(days_before = 0, days_after = 10, lookback_days = 0),
+  suffix       = "_nirsevimab")
+
+rsv_coverage <- cohort_clean |>
+  dplyr::left_join(dplyr::select(abrysvo_linked, baby_id, ends_with("_abrysvo")),
+                    by = "baby_id") |>
+  dplyr::left_join(dplyr::select(nirsevimab_linked, baby_id, ends_with("_nirsevimab")),
+                    by = "baby_id")
+
+# Example 11: Deterministic linkage with phonetic tolerance -- flock() first to
+# generate metaphone codes, then match on those instead of the literal strings
+# (see "Phonetic-key deterministic matching" above). No murmuration() argument
+# changes at all -- this is purely a data-preparation technique.
+dx_phon <- flock(dx_clean,
+  phonetic_vars   = c("lettername1", "lettername2"),
+  phonetic_method = "metaphone")
+hosp_phon <- flock(hosp_clean,
+  phonetic_vars   = c("lettername1", "lettername2"),
+  phonetic_method = "metaphone")
+
+phon_linked <- murmuration(dx_phon, hosp_phon,
+  linkage_type = "cohort2event",
+  event_type   = "hospitalisation",
+  method       = "deterministic",
+  event_date   = "onset_date",
+  id_var       = "identity",
+  blocking_var = "postcode",
+  compare_vars = c("lettername1_metaphone", "lettername2_metaphone", "dob"),
+  clean_eggs   = FALSE)
+# Catches "Smith"/"Smyth"-style transcription variants that exact-string
+# deterministic matching (Example 3) would miss -- at the cost of also
+# conflating rarer, genuinely different names sharing a phonetic code.
 }
+}
+\references{
+\strong{Deterministic linkage (\code{method = "deterministic"}) -- Applied.} Smoll NR,
+Al Imam MH, Shulz C, Booy R, Khandaker G. The effectiveness of vaccination for
+preventing hospitalisation with COVID-19 in regional Queensland: a data linkage study.
+\emph{Med J Aust} 2023;219(4):162--165. \doi{10.5694/mja2.52019}. This study's linkage key --
+full first name (middle names omitted), full last name, and date of birth -- across
+PCR results (NOCS), hospital admissions, and the Australian Immunisation Register is
+exactly what \code{method = "deterministic"} reproduces directly: pass
+\code{compare_vars = c("lettername1", "lettername2", "dob")} to recreate this study's
+linkage recipe (see Example 3).
+
+\strong{Probabilistic linkage (\code{method = "probabilistic"}) -- Precedent.} The same
+Smoll et al. 2023 study is also the methodological precedent for
+\code{method = "probabilistic"}: the Fellegi-Sunter approach generalises that study's
+exact-key design to settings where identifiers are too incomplete or inconsistent for
+an all-fields-exact match to find every true pair.
+
+\strong{Applied.} Roughan WH, Cavanagh-Ochiai B, Barnekow D, Lottkowitz K, Schafer K,
+Camadoo L, Smoll NR. Infant respiratory syncytial virus (RSV) immunisation coverage in
+an Australian regional area, 1 May 2024 - 31 October 2025. \emph{Commun Dis Intell}
+2026;50. \doi{10.33321/cdi.2026.50.031}. About 10\% of this study's birth-register
+records carried identifier or date-of-birth errors that ruled out an exact match to
+hospital and immunisation records; these were resolved with weighted-score matching
+across multiple data points -- the situation \code{method = "probabilistic"} together
+with \code{\link{murmuration_plot}} is built for, where a clean composite key (as in
+the Smoll et al. 2023 design above) cannot be assumed and the score distribution should
+be inspected before a threshold is chosen. The birth-cohort linkage in Example 4 below
+mirrors this study's maternal-neonatal dyad plus vaccination-register design; Example 10
+reproduces its two-pathway (nirsevimab/Abrysvo) linkage directly.
 }

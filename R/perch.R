@@ -19,25 +19,30 @@ utils::globalVariables(c(
 #' pairs object and returns a structured sensitivity table with one row per
 #' candidate cutoff. Each row reports the number and percentage of pairs that
 #' would be accepted or rejected at that threshold, the number falling in a
-#' configurable clerical review zone around it, and (if \code{n_records_df1} is
+#' configurable clerical review zone around it, and (if \code{n_records_primary} is
 #' supplied) the estimated link rate for the primary dataset. Four canonical
 #' thresholds are highlighted in the printed table and the plot with annotations
 #' from the three key Australian and international linkage authorities — AIHW,
 #' WA Data Linkage Unit, and the Population Health Research Network (PHRN).
 #'
 #' Call \code{perch()} after \code{\link{murmuration_plot}} confirms your weight
-#' distribution is bimodal, then pass the chosen value to
-#' \code{\link{murmuration}(threshold_value = ...)}.
+#' distribution is bimodal, to quantify the trade-off at each candidate cutoff,
+#' then pass the chosen value to \code{\link{murmuration}(threshold_value = ...)}.
+#' If individual borderline pairs need a human eye rather than a single blanket
+#' cutoff, use \code{murmuration(inspect_matches = TRUE)} to review them, then
+#' \code{murmuration(resume_from_pairs = ...)} to finish once any needed
+#' \code{match_override} decisions are recorded.
 #'
-#' @param pairs_pred A pairs object (data frame) as returned by
-#'   \code{reclin2::predict.problink_em(m, pairs = pairs, add = TRUE)},
-#'   containing a numeric linkage weight column.
+#' @param pairs_pred A pairs-level data frame with a linkage weight column --
+#'   normally \code{attr(murmuration(...), "pairs_pred")}, but any pairs-level
+#'   object with the same shape (including raw \pkg{reclin2}
+#'   \code{predict.problink_em()} output) works too.
 #' @param weight_col Character. Name of the numeric linkage weight column.
 #'   Default \code{"weights"} (the column name \code{\link{murmuration}} uses
 #'   internally).
-#' @param n_records_df1 Integer or \code{NULL}. Number of records in the primary
-#'   (\code{df1}) dataset passed to \code{\link{murmuration}}. When supplied,
-#'   a \code{link_rate} column is added showing the proportion of df1 records
+#' @param n_records_primary Integer or \code{NULL}. Number of records in the primary
+#'   (\code{data_x}) dataset passed to \code{\link{murmuration}}. When supplied,
+#'   a \code{link_rate} column is added showing the proportion of data_x records
 #'   that would receive at least one accepted match at each threshold. Default
 #'   \code{NULL} (link rate column omitted).
 #' @param thresholds Numeric vector of candidate threshold values to evaluate.
@@ -54,12 +59,12 @@ utils::globalVariables(c(
 #'   clerical zone centred at each candidate threshold).
 #' @param highlight_thresholds Numeric vector. Threshold values to mark with
 #'   \code{[*]} in the printed table and with diamond symbols in the plot.
-#'   Default \code{c(10, 15, 17, 20)} — the four canonical reference points
+#'   Default \code{c(10, 15, 16, 20)} — the four canonical reference points
 #'   from Australian and international linkage guidance (see Details).
 #' @param report Logical. If \code{TRUE} (default), prints a formatted
 #'   sensitivity table with reference annotations to the console.
 #' @param plot Logical. If \code{TRUE} (default), generates and returns a
-#'   \pkg{ggplot2} figure (or \pkg{patchwork} composite if \code{n_records_df1}
+#'   \pkg{ggplot2} figure (or \pkg{patchwork} composite if \code{n_records_primary}
 #'   is supplied) showing match count and link rate against threshold with AIHW
 #'   zone shading and reference markers. If \code{FALSE}, returns only the data
 #'   frame invisibly.
@@ -85,8 +90,8 @@ utils::globalVariables(c(
 #'      \code{threshold + clerical_window/2}].}
 #'   \item{\code{pct_clerical}}{Numeric. Percentage in the clerical zone.}
 #'   \item{\code{link_rate}}{Numeric or \code{NA}. Proportion of
-#'     \code{n_records_df1} records that would receive a match. Only populated
-#'     when \code{n_records_df1} is supplied.}
+#'     \code{n_records_primary} records that would receive a match. Only populated
+#'     when \code{n_records_primary} is supplied.}
 #'   \item{\code{reference}}{Character. Annotation for the four highlighted
 #'     threshold values; \code{NA} for all others.}
 #' }
@@ -101,8 +106,12 @@ utils::globalVariables(c(
 #'   \item \code{perch()} quantifies the match count, link rate, and clerical
 #'     burden at each candidate cutoff in that valley.
 #'   \item Choose the threshold that best balances precision and recall for your
-#'     study design (see benchmarks below), then pass it to
-#'     \code{murmuration(threshold_value = ...)}.
+#'     study design (see benchmarks below). If it looks clean, pass it straight
+#'     to \code{murmuration(threshold_value = ...)}. If individual borderline
+#'     pairs need a human eye first, run
+#'     \code{murmuration(inspect_matches = TRUE)} instead, review the
+#'     candidates (setting \code{match_override} where a manual judgement should
+#'     win), and finish with \code{murmuration(resume_from_pairs = ...)}.
 #' }
 #'
 #' The \code{n_clerical} column is the key diagnostic for threshold placement.
@@ -123,41 +132,43 @@ utils::globalVariables(c(
 #'
 #' | Threshold | Authority and basis |
 #' |---|---|
-#' | **10–20 (clerical zone)** | **AIHW and WA Data Linkage Unit (WADLU)**: the established practice is a two-threshold approach with a clerical review zone of roughly 10–20. Pairs above ~20 are auto-accepted as matches; pairs below ~10 are auto-rejected as non-matches; pairs in between are sent for human adjudication. When operating without a dedicated clerical reviewer (as in most routine surveillance settings), the single threshold should sit somewhere in this range, with the direction of error dictated by the study design. |
-#' | **~15–20** | **Population Health Research Network (PHRN)**: no universal cutoff is mandated, but the operational target is a false-match rate below 0.5%, which in practice corresponds to weights of approximately 15–20 with a full variable set (Medicare + 2 names + DOB). |
-#' | **12–17** | **starling balanced default** — typical starting point for SCPHU routine surveillance linkage with a complete variable set. |
+#' | **10–20 (clerical zone)** | **AIHW and WA Data Linkage Unit (WADLU)**: the established practice is a two-threshold approach with a clerical review zone of roughly 10–20. Pairs above about 20 are auto-accepted as matches; pairs below about 10 are auto-rejected as non-matches; pairs in between are sent for human adjudication. When operating without a dedicated clerical reviewer (as in most routine surveillance settings), the single threshold should sit somewhere in this range, with the direction of error dictated by the study design. |
+#' | **About 15–20** | **Population Health Research Network (PHRN)**: no universal cutoff is mandated, but the operational target is a false-match rate below 0.5%, which in practice corresponds to weights of approximately 15–20 with a full variable set (Medicare + 2 names + DOB). |
+#' | **12–17** | **starling balanced default** — typical starting point for routine surveillance linkage with a complete variable set. |
 #' | **17–22** | **High specificity** — appropriate when false matches carry high analytical cost, e.g. vaccine effectiveness studies where falsely attributing vaccination status to an unvaccinated person biases the VE estimate downward. |
 #' | **8–12** | **High sensitivity** — suitable for small datasets or rare-disease surveillance where missing a true match is the dominant concern. |
 #'
 #' ## Note on link rate
 #'
 #' The \code{link_rate} column approximates the proportion of primary-dataset
-#' records (\code{df1}) that would receive at least one accepted match at a
+#' records (\code{data_x}) that would receive at least one accepted match at a
 #' given threshold. It counts accepted pairs above threshold rather than unique
-#' linked records (one df1 record can appear in multiple pairs), so it is an
+#' linked records (one data_x record can appear in multiple pairs), so it is an
 #' upper bound on the true link rate. Nonetheless it is useful for spotting
 #' the point at which raising the threshold begins to meaningfully reduce
 #' coverage — a sharp inflection in the link rate curve often marks the valley
 #' between the two score modes.
 #'
 #' @seealso
-#' \code{\link{murmuration}} for the linkage step.
+#' \code{\link{murmuration}} for the linkage step, and for \code{inspect_matches}/
+#'   \code{resume_from_pairs} if individual pairs need manual review before
+#'   finishing.
 #' \code{\link{murmuration_plot}} for visual weight distribution inspection.
 #' \code{\link{preflight}} for pre-linkage data quality auditing.
 #' \code{\link{flock}} for blocking variable construction.
 #'
 #' @references
-#' Australian Institute of Health and Welfare (2021).
-#' \emph{Data linkage: cohort studies}. AIHW, Canberra.
-#' \url{https://www.aihw.gov.au/reports/methods-data-development/data-linkage}
+#' Australian Institute of Health and Welfare. \emph{Data linkage services}.
+#' AIHW, Canberra.
 #'
-#' Holman, C.D.J. et al. (1999). A population-based linkage study of
-#' 3.4 million records in Western Australia.
+#' Holman, C.D.J., Bass, A.J., Rouse, I.L. and Hobbs, M.S.T. (1999).
+#' Population-based linkage of health records in Western Australia:
+#' development of a health services research linked database.
 #' \emph{Australian and New Zealand Journal of Public Health}, 23(5): 453–459.
 #' doi:10.1111/j.1467-842X.1999.tb01297.x
 #'
 #' Population Health Research Network (2023). \emph{PHRN Linkage Guidelines}.
-#' PHRN, Perth. \url{https://www.phrn.org.au/}
+#' PHRN, Perth. (PHRN is now Data Connect Australia.)
 #'
 #' Fellegi, I. and Sunter, A. (1969). A theory for record linkage.
 #' \emph{Journal of the American Statistical Association}, 64(328): 1183–1210.
@@ -165,44 +176,51 @@ utils::globalVariables(c(
 #'
 #' @examples
 #' \dontrun{
-#' # Standard workflow: score pairs then perch to find the best threshold
-#' library(reclin2)
-#'
-#' pairs <- pair_blocking(df1, df2, "block2")
-#' compare_pairs(pairs,
-#'   on = c("lettername1", "lettername2", "dob", "medicare10"),
-#'   default_comparator = jaro_winkler(0.9), inplace = TRUE)
-#' m          <- problink_em(
-#'   ~ lettername1 + lettername2 + dob + medicare10, data = pairs)
-#' pairs_pred <- predict(m, pairs = pairs, add = TRUE)
+#' # Standard workflow: score pairs with murmuration(), then perch to find the
+#' # best threshold. No need to hand-roll the reclin2 pipeline -- run
+#' # murmuration() once and use what it already attaches to its own output.
+#' linked <- murmuration(data_x, data_y,
+#'   linkage_type  = "cohort2event", event_type = "vaccination",
+#'   event_date    = "onset_date",
+#'   id_var        = "id_var",
+#'   blocking_var  = "block2",
+#'   compare_vars  = c("lettername1", "lettername2", "dob", "medicare10"),
+#'   threshold_value = 16)
+#' pairs_pred <- attr(linked, "pairs_pred")
 #'
 #' # Step 1: inspect the distribution
-#' murmuration_plot(pairs_pred, threshold = 17)
+#' murmuration_plot(linked)
 #'
 #' # Step 2: quantify the trade-off across the plausible range
-#' results <- perch(pairs_pred, n_records_df1 = nrow(df1))
+#' results <- perch(pairs_pred, n_records_primary = nrow(data_x))
 #'
 #' # Step 3: narrow to the AIHW clerical zone for fine-grained inspection
 #' results <- perch(pairs_pred,
 #'   thresholds    = seq(10, 20, by = 0.5),
-#'   n_records_df1 = nrow(df1))
+#'   n_records_primary = nrow(data_x))
 #'
 #' # Get only the data frame (no plot)
 #' tbl <- perch(pairs_pred, plot = FALSE)
 #'
 #' # Interactive dual-panel plot for exploratory use
-#' perch(pairs_pred, n_records_df1 = nrow(df1), interactive = TRUE)
+#' perch(pairs_pred, n_records_primary = nrow(data_x), interactive = TRUE)
 #'
 #' # Greyscale for publication figures
 #' perch(pairs_pred, palette = "grey")
 #'
-#' # Step 4: apply the chosen threshold
-#' linked <- murmuration(df1, df2,
-#'   linkage_type  = "v2c",
+#' # Step 4: happy with 18 instead of 16? No need to re-fit -- re-run
+#' # murmuration() with the new threshold_value directly.
+#' linked <- murmuration(data_x, data_y,
+#'   linkage_type  = "cohort2event", event_type = "vaccination",
 #'   event_date    = "onset_date",
+#'   id_var        = "id_var",
 #'   blocking_var  = "block2",
 #'   compare_vars  = c("lettername1", "lettername2", "dob", "medicare10"),
 #'   threshold_value = 18)
+#'
+#' # Step 5 (optional): if individual borderline pairs need a human eye rather
+#' # than a single blanket cutoff -- see murmuration(inspect_matches = TRUE)
+#' # and murmuration(resume_from_pairs = ...) instead of Step 4.
 #' }
 #'
 #' @importFrom ggplot2 ggplot aes geom_line geom_point geom_text geom_vline
@@ -212,10 +230,10 @@ utils::globalVariables(c(
 #' @export
 perch <- function(pairs_pred,
                   weight_col           = "weights",
-                  n_records_df1        = NULL,
+                  n_records_primary        = NULL,
                   thresholds           = seq(5, 30, by = 1),
                   clerical_window      = 6,
-                  highlight_thresholds = c(10, 15, 17, 20),
+                  highlight_thresholds = c(10, 15, 16, 20),
                   report               = TRUE,
                   plot                 = TRUE,
                   palette              = "sch",
@@ -227,7 +245,8 @@ perch <- function(pairs_pred,
   if (!inherits(pairs_pred, "data.frame"))
     stop(
       "(*)> starling::perch() \u2014 'pairs_pred' must be a data frame or pairs object.\n",
-      "Pass the output of predict(m, pairs = pairs, add = TRUE) from reclin2."
+      "Pass attr(murmuration(...), \"pairs_pred\"), or any pairs-level data frame ",
+      "with a linkage weight column."
     )
 
   if (!weight_col %in% names(pairs_pred))
@@ -257,7 +276,7 @@ perch <- function(pairs_pred,
   .ref_labels <- c(
     "10" = "AIHW/WADLU: lower bound of clerical review zone",
     "15" = "PHRN: lower bound for <0.5% false-match rate (full variable set)",
-    "17" = "starling default (balanced: Medicare + 2 names + DOB)",
+    "16" = "starling default (balanced: Medicare + 2 names + DOB)",
     "20" = "AIHW/WADLU: upper bound of clerical zone / confirmed matches above"
   )
 
@@ -287,8 +306,8 @@ perch <- function(pairs_pred,
                           weights_all <  (t + half_window))
     pct_clerical <- round(100 * n_clerical / n_pairs_total, 2)
 
-    link_rate <- if (!is.null(n_records_df1) && n_records_df1 > 0) {
-      round(n_above / n_records_df1, 4)
+    link_rate <- if (!is.null(n_records_primary) && n_records_primary > 0) {
+      round(n_above / n_records_primary, 4)
     } else {
       NA_real_
     }
@@ -319,24 +338,24 @@ perch <- function(pairs_pred,
   # Colour palette
   # ------------------------------------------------------------------
   cols <- switch(palette,
-    sch = list(
-      match     = "#08403B",   # SCH Evergreen
-      clerical  = "#C8A96E",   # SCH Gold
-      highlight = "#D64045",   # SCH Red
-      zone_fill = "#C8A96E"
-    ),
-    default = list(
-      match     = "#1B7B8A",
-      clerical  = "#E07070",
-      highlight = "#333333",
-      zone_fill = "#E07070"
-    ),
-    grey = list(
-      match     = "#333333",
-      clerical  = "#999999",
-      highlight = "#000000",
-      zone_fill = "#999999"
-    )
+                 sch = list(
+                   match     = "#08403B",   # SCH Evergreen
+                   clerical  = "#C8A96E",   # SCH Gold
+                   highlight = "#D64045",   # SCH Red
+                   zone_fill = "#C8A96E"
+                 ),
+                 default = list(
+                   match     = "#1B7B8A",
+                   clerical  = "#E07070",
+                   highlight = "#333333",
+                   zone_fill = "#E07070"
+                 ),
+                 grey = list(
+                   match     = "#333333",
+                   clerical  = "#999999",
+                   highlight = "#000000",
+                   zone_fill = "#999999"
+                 )
   )
 
   # ------------------------------------------------------------------
@@ -356,7 +375,7 @@ perch <- function(pairs_pred,
       sep = ""
     )
 
-    has_lr <- !is.null(n_records_df1)
+    has_lr <- !is.null(n_records_primary)
     hdr <- sprintf(
       "  %-9s  %8s  %7s  %8s  %8s%s  Reference\n",
       "Threshold", "n_above", "pct (%)", "n_clerical", "clerical%",
@@ -400,7 +419,7 @@ perch <- function(pairs_pred,
       "          marginal pairs sent for human adjudication.\n",
       "   15\u201320  PHRN operational target for <0.5% false-match rate\n",
       "          (full variable set: Medicare + 2 names + DOB).\n",
-      "   17     starling default \u2014 balanced for SCPHU routine surveillance.\n\n",
+      "   16     starling default \u2014 balanced for routine surveillance linkage.\n\n",
       sep = ""
     )
   }
@@ -493,7 +512,7 @@ perch <- function(pairs_pred,
       )
 
     # Optional link-rate panel below the main plot
-    if (!is.null(n_records_df1) && !all(is.na(plot_df$link_rate))) {
+    if (!is.null(n_records_primary) && !all(is.na(plot_df$link_rate))) {
       if (requireNamespace("patchwork", quietly = TRUE)) {
         p_lr <- ggplot2::ggplot(plot_df, ggplot2::aes(x = threshold)) +
           ggplot2::annotate(
@@ -548,7 +567,7 @@ perch <- function(pairs_pred,
             " (", pct_above, "%)",
             "\nClerical:  ", format(n_clerical, big.mark = ","),
             " (", pct_clerical, "%)",
-            if (!is.null(n_records_df1) && !is.na(link_rate))
+            if (!is.null(n_records_primary) && !is.na(link_rate))
               paste0("\nLink rate: ", round(link_rate * 100, 1), "%")
             else ""
           )

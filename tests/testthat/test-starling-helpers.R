@@ -79,9 +79,9 @@ test_that("flock() creates block1 from composite columns", {
 
 test_that("flock() creates block2 and block3 when supplied", {
   df <- make_df1()
-  result <- suppressMessages(flock(df,
+  result <- suppressWarnings(suppressMessages(flock(df,
     block1_vars = "gender",
-    block2_vars = "postcode"))
+    block2_vars = "postcode")))
   expect_true("block1" %in% names(result))
   expect_true("block2" %in% names(result))
   expect_false("block3" %in% names(result))
@@ -182,8 +182,10 @@ test_that("check_medicare() respects custom output_col name", {
 
 test_that("check_medicare() produces verbose output without error", {
   df <- make_df1()
-  expect_output(check_medicare(df, medicare_col = "medicare", verbose = TRUE),
-                "Total records")
+  expect_output(
+    suppressWarnings(check_medicare(df, medicare_col = "medicare", verbose = TRUE)),
+    "Total records"
+  )
 })
 
 # ------------------------------------------------------------------
@@ -194,9 +196,11 @@ test_that("preflight() runs without error on valid inputs", {
   df1 <- make_df1()
   df2 <- make_df2()
   expect_output(
-    result <- preflight(df1, df2,
-                        linkage_vars = c("lettername1", "lettername2", "dob"),
-                        id_col1 = "id_var", id_col2 = "id_var"),
+    result <- suppressWarnings(
+      preflight(df1, df2,
+                linkage_vars = c("lettername1", "lettername2", "dob"),
+                id_col1 = "id_var", id_col2 = "id_var")
+    ),
     regexp = "Pre-Linkage"
   )
   expect_type(result, "list")
@@ -306,9 +310,8 @@ make_pairs_pred <- function(n = 200) {
 
 test_that("murmuration_plot() returns a ggplot object", {
   pairs <- make_pairs_pred()
-  p <- murmuration_plot(pairs, threshold = 17, show_density = FALSE)
-  # patchwork objects have class "patchwork"; base ggplot has class "gg"/"ggplot"
-  expect_true(inherits(p, "gg") || inherits(p, "patchwork"))
+  p <- murmuration_plot(pairs, threshold = 17)
+  expect_true(inherits(p, "gg"))
 })
 
 test_that("murmuration_plot() errors when weight_col is missing", {
@@ -331,15 +334,15 @@ test_that("murmuration_plot() errors when threshold is not numeric", {
 test_that("murmuration_plot() accepts all three palette options", {
   pairs <- make_pairs_pred()
   for (pal in c("sch", "default", "grey")) {
-    p <- murmuration_plot(pairs, threshold = 17, palette = pal, show_density = FALSE)
-    expect_true(inherits(p, "gg") || inherits(p, "patchwork"))
+    p <- murmuration_plot(pairs, threshold = 17, palette = pal)
+    expect_true(inherits(p, "gg"))
   }
 })
 
 test_that("murmuration_plot() subsamples large pairs objects with message", {
   pairs <- make_pairs_pred(n = 10000)
   expect_message(
-    murmuration_plot(pairs, threshold = 17, n_sample = 100, show_density = FALSE),
+    murmuration_plot(pairs, threshold = 17, n_sample = 100),
     regexp = "random sample"
   )
 })
@@ -352,7 +355,6 @@ test_that("murmuration_plot() handles all-missing weights gracefully", {
 
 test_that("murmuration_plot() custom title is used", {
   pairs <- make_pairs_pred()
-  p <- murmuration_plot(pairs, threshold = 17, title = "My custom title",
-                        show_density = FALSE)
-  expect_true(inherits(p, "gg") || inherits(p, "patchwork"))
+  p <- murmuration_plot(pairs, threshold = 17, title = "My custom title")
+  expect_true(inherits(p, "gg"))
 })

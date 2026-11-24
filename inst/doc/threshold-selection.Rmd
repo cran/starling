@@ -1,6 +1,6 @@
 ---
 title: "Threshold Selection: Using perch() and murmuration_plot()"
-subtitle: "Understanding and calibrating the Fellegi-Sunter linkage cutoff"
+subtitle: "Understanding, calibrating, and (when needed) manually reviewing the Fellegi-Sunter linkage cutoff"
 author: "Dr Nicolas Smoll, SCPHU, Sunshine Coast Hospital and Health Service"
 date: "`r Sys.Date()`"
 output:
@@ -13,99 +13,301 @@ output:
     toc: true
     toc_depth: 3
 vignette: >
-  %\VignetteIndexEntry{Threshold Selection with perch()}
+  %\VignetteIndexEntry{Threshold Selection: Using perch() and murmuration_plot()}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
 ```{r setup, include = FALSE}
+# The worked data (the clutch datasets) live in mudnester; if it is not
+# installed the vignette stops cleanly after this point.
+has_mudnester <- requireNamespace("mudnester", quietly = TRUE) &&
+  utils::packageVersion("mudnester") >= "0.9.0"   # the clutch datasets arrived in 0.9.0
 knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment  = "#>",
-  message  = FALSE,
-  warning  = FALSE,
+  fig.retina = 1,   # 1x figures: keeps the built HTML small for CRAN
+  collapse   = TRUE,
+  comment    = "#>",
+  message    = FALSE,
+  warning    = FALSE,
   fig.width  = 8,
-  fig.height = 5
+  fig.height = 4.5,
+  eval       = has_mudnester
 )
 ```
 
-## Why the threshold matters
+```{r needs-mudnester, echo = FALSE, eval = !has_mudnester, results = "asis"}
+cat("This vignette uses the clutch datasets from the mudnester package. Install mudnester (>= 0.9.0) to run it.")
+knitr::knit_exit()
+```
 
-In the Fellegi-Sunter probabilistic linkage framework, every candidate pair of
+```{r load}
+library(starling)
+library(mudnester)   # clean_the_nest() and the clutch_* datasets
+library(dplyr)
+library(ggplot2)
+
+aviary_cols <- c(satin = "#325D88", chestnut = "#86251C", wattle = "#D8A31A",
+                 evergreen = "#08403B", mud = "#A67D4C", slate = "#3E3F3A")
+```
+
+## (*)> Why the threshold matters
+
+In the Fellegi-Sunter probabilistic linkage framework [1], every candidate pair of
 records receives a composite log-likelihood ratio score. Pairs scoring above a
 chosen threshold are classified as matches; those below are classified as
-non-matches. This threshold is **dataset-specific** — there is no universal
+non-matches. This threshold is **dataset-specific** -- there is no universal
 correct value, because the score scale depends entirely on which variables are
 compared, their quality, and the composition of the two datasets being linked.
 
 Choosing the threshold too low increases recall (more true matches recovered)
 at the cost of precision (more false matches accepted). Choosing it too high
 does the reverse. The optimal value sits in the **valley between the bimodal
-score distribution** — the gap between the non-match cluster at low scores and
+score distribution** -- the gap between the non-match cluster at low scores and
 the match cluster at high scores.
 
-`starling` provides two complementary tools:
+`starling` provides two complementary tools for choosing that value, plus a
+way to review individual pairs when the distribution-level view isn't enough:
 
-- **`murmuration_plot()`** — shows the full weight distribution visually so you
+- **`murmuration_plot()`** -- shows the full weight distribution visually so you
   can see where the valley is
-- **`perch()`** — quantifies match count, link rate, and clerical burden at
+- **`perch()`** -- quantifies match count, link rate, and clerical burden at
   each candidate cutoff, annotated with AIHW, WA Data Linkage Unit, and PHRN
   reference benchmarks
+- **`murmuration(inspect_matches = TRUE)`** -- for the less common case where a
+  single blanket cutoff isn't enough and specific pairs need a human eye (see
+  [Reviewing individual pairs](#reviewing-individual-pairs) below)
 
----
+***
 
-## Australian linkage authority benchmarks
+## (*)> Australian linkage authority benchmarks
 
 The three key Australian and international reference points:
 
 | Threshold range | Authority | Basis |
 |---|---|---|
-| **10–20 (clerical zone)** | AIHW / WA Data Linkage Unit (WADLU) | Standard two-threshold practice: confirmed matches above ~20, confirmed non-matches below ~10, marginal pairs sent for human adjudication |
-| **~15–20** | Population Health Research Network (PHRN) | Operational target: false-match rate < 0.5% with a full variable set (Medicare + 2 names + DOB) |
-| **17** | starling default | Balanced starting point for SCPHU routine surveillance linkage |
+| **10--20 (clerical zone)** | AIHW / WA Data Linkage Unit (WADLU) | Standard two-threshold practice: confirmed matches above about 20, confirmed non-matches below about 10, marginal pairs sent for human adjudication |
+| **About 15--20** | Population Health Research Network (PHRN) | Operational target: false-match rate < 0.5% with a full variable set (Medicare + 2 names + DOB) |
+| **16** | starling default | Calibrated on SCPHU linkages with 5 comparison variables (first name, last name, DOB, Medicare, and gender or postcode) where the Medicare number is present and current on both records |
 
 These are reference points, not rules. The correct threshold for your dataset
-is the one that sits in the valley of your score distribution.
+is the one that sits in the valley of *your* score distribution -- and, as the
+worked example below shows, it can sit a long way from any of them. The
+section [How many comparison variables?](#how-many-comparison-variables)
+measures what the default recovers with 3, 4 and 5 variables.
 
----
+***
 
-## Example: running perch() on scored pairs
+## (*)> The worked example
 
-```{r perch-demo}
-library(starling)
+The pairs come from a real linkage problem rather than a simulation: the
+`clutch_cases` notification linelist linked to the `clutch_air` immunisation
+register extract, both shipped in `mudnester`. They are synthetic people, but
+the identifier errors are realistic (typos, nicknames, swapped day and month,
+Medicare missing on about one notification in seven, households sharing a
+Medicare card). Each record carries a `truth_id`, so every threshold can be
+graded -- something only a synthetic dataset allows. A threshold chosen from
+the score distribution rather than assumed is also how real studies handle
+records with identifier errors: an infant immunisation coverage study resolved
+about one birth-register record in ten that way [3]. Cleaning follows
+`vignette("pre-linkage-quality")`:
 
-# Simulate a scored pairs object (bimodal: non-matches low, matches high)
-set.seed(20260624L)
-n_nonmatch <- 800
-n_match    <- 200
-pairs_pred <- data.frame(
-  weights = c(
-    rnorm(n_nonmatch, mean = 5,  sd = 3),   # non-match cluster
-    rnorm(n_match,    mean = 20, sd = 3)    # match cluster
+```{r prepare}
+cases_clean <- clutch_cases |>
+  mutate(onset_imputed = is.na(onset_date),
+         onset_date    = coalesce(onset_date, specimen_date)) |>
+  clean_the_nest(
+    data_type = "cases", drop_eggs = TRUE,
+    id_var = "notification_id", diagnosis = "condition",
+    lettername1 = "first_name", lettername2 = "surname", dob = "date_of_birth",
+    gender = "sex", postcode = "postcode", medicare = "medicare_number",
+    onset_date = "onset_date", keep_vars = c("truth_id", "onset_imputed")
   )
-)
-
-# Run the sensitivity sweep
-results <- perch(
-  pairs_pred    = pairs_pred,
-  n_records_df1 = 250L,         # size of the primary dataset
-  thresholds    = seq(5, 28, by = 1),
-  report        = TRUE,
-  plot          = FALSE          # set TRUE in interactive session
-)
 ```
 
-The `[*]` markers in the table show the four reference threshold values from
-AIHW, PHRN, and the starling default.
+> **(*)> One vaccine type at a time.** For a vaccine question, filter the AIR
+> extract to the vaccine you are studying before
+> `clean_the_nest(lie_nest_flat = TRUE)` and `murmuration()` -- otherwise
+> `vax_date_1`, `vax_date_2`, ... interleave every vaccine the person has had,
+> and the dose counts and `vaccination_status` mean "any vaccine". This
+> vignette grades *identity* links, so it deliberately keeps every AIR person
+> with a recorded vaccine of any type: that gives every notification the best
+> chance of having a true record to find. Its event-window outputs (in
+> [Reviewing individual pairs](#reviewing-individual-pairs)) are therefore "any
+> vaccine" and are only used to count links.
 
----
+```{r prepare-air}
+air_clean <- clutch_air |>   # all antigens: every AIR person, for grading identity links
+  clean_the_nest(
+    data_type = "vaccination", lie_nest_flat = TRUE, drop_eggs = TRUE,
+    id_var = "air_id", lettername1 = "given_name", lettername2 = "family_name",
+    dob = "date_of_birth", gender = "sex", postcode = "postcode",
+    medicare = "medicare_card", medicare_irn = "medicare_irn",
+    vax_type = "antigen", vax_date = "date_of_service", keep_vars = "truth_id"
+  )
 
-## Example: visualising the score distribution
+# Invalid Medicare numbers become NA in both comparison fields, then
+# block1: gender + birth year (used throughout); block2: birth year alone,
+# for the comparison that scores gender instead of blocking on it
+cases_blocked <- cases_clean |>
+  check_medicare(verbose = FALSE) |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10),
+         medicare09 = if_else(medicare_valid %in% 0L, NA_character_, medicare09)) |>
+  flock(block1_vars = c("gender", "birth_year"), block2_vars = "birth_year",
+        birth_year_col = "dob")
 
-```{r plot, fig.cap = "Linkage weight distribution. The threshold line should sit in the valley between the two clusters."}
-murmuration_plot(pairs_pred, threshold = 17, show_density = FALSE,
-                 palette = "sch")
+air_blocked <- air_clean |>
+  check_medicare(verbose = FALSE) |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10),
+         medicare09 = if_else(medicare_valid %in% 0L, NA_character_, medicare09)) |>
+  flock(block1_vars = c("gender", "birth_year"), block2_vars = "birth_year",
+        birth_year_col = "dob")
+
+n_true <- cases_blocked |>
+  filter(truth_id %in% air_blocked$truth_id) |>
+  nrow()
+c(cases = nrow(cases_blocked), air_people = nrow(air_blocked),
+  cases_with_a_true_air_record = n_true)
 ```
+
+***
+
+## (*)> Scoring every candidate pair once
+
+`murmuration(inspect_matches = TRUE)` stops straight after blocking and EM
+scoring (run through `reclin2` [2]) and returns every candidate pair -- not only those above the
+threshold -- with the comparison fields from both sides joined in.
+`inspect_extra_vars` joins in context that is not scored: `truth_id` (the
+grading column) and `medicare_irn`, the 11th Medicare digit, used in
+[Reviewing individual pairs](#reviewing-individual-pairs). Nothing is decided
+yet, so every threshold below can be explored from this one object without
+re-fitting.
+
+```{r inspect-4}
+review_4 <- murmuration(
+  data_x             = cases_blocked,   # every notification
+  data_y             = air_blocked,     # every AIR person
+  linkage_type       = "cohort2event",
+  event_type         = "vaccination",
+  id_var             = "id_var",
+  blocking_var       = "block1",        # gender + birth year
+  compare_vars       = c("lettername1", "lettername2", "dob", "medicare10"),
+  threshold_value    = 8,               # only marks the pairs; nothing is decided yet
+  inspect_matches    = TRUE,            # stop after scoring; event_date not needed
+  inspect_extra_vars = c("truth_id", "medicare09", "medicare_irn")  # context, not scored
+)
+
+medicare_levels <- c("Same Medicare number",
+                     "Same account, card issue digit differs",
+                     "Different Medicare number",
+                     "Medicare missing on one or both records")
+
+review_4 <- review_4 |>
+  mutate(
+    pair_type = if_else(truth_id.x == truth_id.y, "True match", "Non-match"),
+    medicare_status = case_when(
+      is.na(medicare10.x) | is.na(medicare10.y) ~ medicare_levels[4],
+      medicare10.x == medicare10.y              ~ medicare_levels[1],
+      medicare09.x == medicare09.y              ~ medicare_levels[2],
+      TRUE                                      ~ medicare_levels[3]
+    ),
+    medicare_status = factor(medicare_status, levels = medicare_levels)
+  )
+
+c(candidate_pairs = nrow(review_4),
+  true_pairs      = sum(review_4$pair_type == "True match"),
+  max_weight      = round(max(review_4$weights), 2))
+```
+
+***
+
+## (*)> Running `perch()` on the scored pairs
+
+```{r perch-table}
+sweep_4 <- perch(review_4,
+                 n_records_primary = nrow(cases_blocked),
+                 thresholds        = seq(4, 20, by = 1),
+                 report            = FALSE,
+                 plot              = FALSE)
+
+sweep_4 |>
+  select(threshold, n_above, pct_above, n_clerical, link_rate, reference) |>
+  knitr::kable(caption = "Accepted pairs and clerical burden by threshold (4 comparison variables)")
+
+clerical_8  <- sweep_4 |> filter(threshold == 8)  |> pull(n_clerical)
+clerical_16 <- sweep_4 |> filter(threshold == 16) |> pull(n_clerical)
+```
+
+With `report = TRUE` (the default) the same table is printed with `[*]`
+markers on the four reference thresholds. With `plot = TRUE` the sweep is
+drawn, the AIHW/WADLU clerical zone shaded:
+
+```{r perch-plot, fig.height = 5}
+perch(review_4,
+      n_records_primary = nrow(cases_blocked),
+      thresholds        = seq(4, 20, by = 0.5),
+      report            = FALSE)
+```
+
+The accepted count is nearly flat between about 7 and 10 and then drops in
+steps. A flat stretch is what a valley looks like in this view: moving the
+threshold through it changes almost nothing.
+
+***
+
+## (*)> Visualising the score distribution
+
+```{r plot, fig.cap = "Candidate-pair weights by blocking stratum (gender + birth year; the busiest strata shown, the rest pooled), with the threshold at 8."}
+murmuration_plot(review_4, max_levels = 10, palette = "sch")
+```
+
+Splitting the same weights by what happened to the Medicare number shows
+*why* the valley sits so low. The tenth digit is the card *issue* number,
+which changes every time a card is replaced, so the same person can carry
+several 10-digit numbers over a lifetime:
+
+```{r medicare-split, fig.height = 7, fig.cap = "Weights of true matches and non-matches, by Medicare agreement. Solid line: threshold 8; dashed line: the default 16. Counts on a log scale."}
+review_4 |>
+  as.data.frame() |>
+  filter(weights > 0) |>
+  ggplot(aes(x = weights, fill = pair_type)) +
+  geom_histogram(binwidth = 0.5, position = "identity", alpha = 0.75) +
+  geom_vline(xintercept = 8, colour = aviary_cols[["chestnut"]]) +
+  geom_vline(xintercept = 16, linetype = "dashed", colour = aviary_cols[["chestnut"]]) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("True match" = aviary_cols[["evergreen"]],
+                               "Non-match" = aviary_cols[["wattle"]])) +
+  facet_wrap(~ medicare_status, ncol = 1) +
+  labs(x = "Linkage weight", y = "Pairs (log scale)", fill = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+```{r medicare-clusters}
+review_4 |>
+  as.data.frame() |>
+  mutate(is_true = pair_type == "True match") |>
+  group_by(medicare_status, .drop = FALSE) |>
+  summarise(
+    true_pairs        = sum(is_true),
+    true_median_wt    = round(median(weights[is_true]), 1),
+    true_5th_pct_wt   = round(unname(quantile(weights[is_true], 0.05)), 1),
+    true_ge_16_pct    = round(100 * mean(weights[is_true] >= 16), 1),
+    non_matches_ge_8  = sum(!is_true & weights >= 8),
+    non_matches_ge_12 = sum(!is_true & weights >= 12)
+  ) |>
+  knitr::kable(caption = "Three clusters of true matches (NA: no pairs in that group)")
+```
+
+There are three match clusters, not one. When all four fields agree the
+weight is close to the maximum. When the card has been reissued between the
+two records the Medicare comparison only partly agrees and the true pair
+drops to about 13; when Medicare is missing on one side it can score no more
+than the name and date-of-birth weights, around 10. The default of 16 sits
+under nearly all of the upper cluster and above both lower ones: it does not
+sit between matches and non-matches at all, but between *Medicare agrees* and
+*everything else*. The handful of non-matches above 12 are mostly family
+members who share a Medicare card and a birth year; below 12 they are joined
+by people with common names born in the same year.
 
 A well-behaved distribution is clearly bimodal. If yours is not:
 
@@ -116,27 +318,379 @@ A well-behaved distribution is clearly bimodal. If yours is not:
   variable that only passes near-certain matches.
 - **Flat / no clear valley**: the comparison variables may lack discriminating
   power. Review `preflight()` output for high missingness or poor name quality.
+- **Several match clusters, as here**: one comparison field is often missing.
+  Choose the valley below the *lowest* match cluster you want to keep.
 
----
+***
 
-## Using `perch_before_linking = TRUE` inside `murmuration()`
+## (*)> Grading thresholds against the truth
+
+With ground truth available, each threshold can be scored directly: keep the
+highest-weighted candidate per case among pairs at or above the threshold,
+then count how many are the right person.
+
+```{r grade-4}
+# The highest-weighted candidate per case is the link at every threshold it
+# clears, so grading a threshold is just counting top candidates above it.
+top_4 <- review_4 |>
+  as.data.frame() |>
+  arrange(desc(weights)) |>
+  distinct(id_var.x, .keep_all = TRUE) |>
+  transmute(id_var.x, weights, correct = truth_id.x == truth_id.y)
+
+grade_4 <- tibble(threshold = seq(5, 18, by = 0.5)) |>
+  cross_join(top_4) |>
+  filter(weights >= threshold) |>
+  group_by(threshold) |>
+  summarise(links = n(), correct = sum(correct)) |>
+  mutate(precision = correct / links,
+         recall    = correct / n_true,
+         f1        = 2 * precision * recall / (precision + recall))
+
+best_4    <- grade_4 |> slice_max(f1, n = 1, with_ties = FALSE) |> pull(threshold)
+at_best_4 <- grade_4 |> filter(threshold == best_4)
+at_16_4   <- grade_4 |> filter(threshold == 16)
+
+grade_4 |>
+  filter(threshold %in% c(5, 6, 7, 7.5, 8, 9, 10, 11, 12, 14, 16, 17)) |>
+  knitr::kable(digits = 3,
+               caption = "Precision, recall and F1 by threshold (4 comparison variables)")
+```
+
+```{r grade-plot, fig.height = 4}
+grade_long <- bind_rows(
+  grade_4 |> transmute(threshold, measure = "Precision", value = precision),
+  grade_4 |> transmute(threshold, measure = "Recall",    value = recall),
+  grade_4 |> transmute(threshold, measure = "F1",        value = f1)
+)
+
+ggplot(grade_long, aes(x = threshold, y = value, colour = measure)) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = best_4, colour = aviary_cols[["evergreen"]]) +
+  geom_vline(xintercept = 16, colour = aviary_cols[["chestnut"]], linetype = "dashed") +
+  annotate("text", x = best_4, y = 0.55, label = paste("best F1 at", best_4),
+           hjust = -0.1, colour = aviary_cols[["evergreen"]]) +
+  annotate("text", x = 16, y = 0.55, label = "default 16", hjust = 1.1,
+           colour = aviary_cols[["chestnut"]]) +
+  scale_colour_manual(values = c(Precision = aviary_cols[["satin"]],
+                                 Recall = aviary_cols[["wattle"]],
+                                 F1 = aviary_cols[["slate"]])) +
+  labs(x = "Threshold", y = NULL, colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+F1 peaks at `r best_4`, with precision
+`r round(100 * at_best_4$precision, 1)`% and recall
+`r round(100 * at_best_4$recall, 1)`%. At the
+default 16 precision is essentially perfect but recall falls to
+`r round(100 * at_16_4$recall, 1)`%: of the people
+who *are* in the register,
+`r round(100 - 100 * at_16_4$recall)`% would be
+classed as unvaccinated, which biases any vaccine effectiveness estimate built
+on the linkage. In production there is no truth column, but the valley in
+`murmuration_plot()` and the flat stretch in `perch()` point to the same place.
+
+***
+
+## (*)> How many comparison variables? {#how-many-comparison-variables}
+
+The default `threshold_value = 16` is calibrated for five comparison
+variables -- first name, last name, date of birth, Medicare number, and gender
+or postcode -- with a Medicare number that agrees on both records. Every
+variable added raises the ceiling of the weight scale, so a threshold only
+means something next to the variable set it was chosen for. To measure how
+much that matters, the same cases are scored against the same register six
+ways, one `murmuration()` call each. `threshold_value` is left at its
+default, so each table's `threshold` column already marks the pairs at or
+above 16.
+
+| Set | Comparison variables | Blocking |
+|---|---|---|
+| 3 | `lettername1`, `lettername2`, `dob` | gender + birth year (`block1`) |
+| 4 | + `medicare10` (`review_4` above) | gender + birth year |
+| 4 | + `medicare09` | gender + birth year |
+| 5 | + `medicare10` + `postcode` | gender + birth year |
+| 5 | + `medicare09` + `postcode` | gender + birth year |
+| 5 | + `medicare10` + `gender` | birth year only (`block2`) |
+
+Gender cannot be the fifth variable inside a gender block: it agrees on every
+pair there, so it carries no weight. Scoring it means blocking on birth year
+alone. The three-variable set is the probabilistic counterpart of the exact
+first name, last name and date-of-birth key used by a regional Queensland
+COVID-19 vaccine effectiveness linkage study [4].
+
+```{r nvars-score}
+# threshold_value is left at its default (16) in every call
+review_3 <- murmuration(
+  data_x             = cases_blocked,
+  data_y             = air_blocked,
+  linkage_type       = "cohort2event",
+  event_type         = "vaccination",
+  id_var             = "id_var",
+  blocking_var       = "block1",       # gender + birth year
+  compare_vars       = c("lettername1", "lettername2", "dob"),
+  inspect_matches    = TRUE,           # score only
+  inspect_extra_vars = "truth_id"      # for grading
+)
+review_4_m09 <- murmuration(
+  data_x             = cases_blocked,
+  data_y             = air_blocked,
+  linkage_type       = "cohort2event",
+  event_type         = "vaccination",
+  id_var             = "id_var",
+  blocking_var       = "block1",
+  compare_vars       = c("lettername1", "lettername2", "dob", "medicare09"),
+  inspect_matches    = TRUE,
+  inspect_extra_vars = "truth_id"
+)
+review_5_pc <- murmuration(
+  data_x             = cases_blocked,
+  data_y             = air_blocked,
+  linkage_type       = "cohort2event",
+  event_type         = "vaccination",
+  id_var             = "id_var",
+  blocking_var       = "block1",
+  compare_vars       = c("lettername1", "lettername2", "dob", "medicare10", "postcode"),
+  inspect_matches    = TRUE,
+  inspect_extra_vars = c("truth_id", "medicare09")
+)
+review_5_m09 <- murmuration(
+  data_x             = cases_blocked,
+  data_y             = air_blocked,
+  linkage_type       = "cohort2event",
+  event_type         = "vaccination",
+  id_var             = "id_var",
+  blocking_var       = "block1",
+  compare_vars       = c("lettername1", "lettername2", "dob", "medicare09", "postcode"),
+  inspect_matches    = TRUE,
+  inspect_extra_vars = c("truth_id", "medicare10")
+)
+review_5_sex <- murmuration(
+  data_x             = cases_blocked,
+  data_y             = air_blocked,
+  linkage_type       = "cohort2event",
+  event_type         = "vaccination",
+  id_var             = "id_var",
+  blocking_var       = "block2",       # birth year only
+  compare_vars       = c("lettername1", "lettername2", "dob", "medicare10", "gender"),
+  inspect_matches    = TRUE,
+  inspect_extra_vars = "truth_id"
+)
+```
+
+Each set is graded exactly as before: at every threshold, keep the
+highest-weighted candidate per case and count how many are the right person.
+
+```{r nvars-grade}
+set_names <- c("3: names + DOB",
+               "4: + medicare10",
+               "4: + medicare09",
+               "5: + medicare10 + postcode",
+               "5: + medicare09 + postcode",
+               "5: + medicare10 + gender (year blocks)")
+
+# every scored pair from the six runs, labelled by variable set
+all_pairs <- bind_rows(
+  review_3     |> as.data.frame() |> mutate(variables = set_names[1]),
+  review_4     |> as.data.frame() |> mutate(variables = set_names[2]),
+  review_4_m09 |> as.data.frame() |> mutate(variables = set_names[3]),
+  review_5_pc  |> as.data.frame() |> mutate(variables = set_names[4]),
+  review_5_m09 |> as.data.frame() |> mutate(variables = set_names[5]),
+  review_5_sex |> as.data.frame() |> mutate(variables = set_names[6])
+) |>
+  select(variables, id_var.x, truth_id.x, truth_id.y, weights) |>
+  mutate(variables = factor(variables, levels = set_names))
+
+set_sizes <- all_pairs |>
+  group_by(variables) |>
+  summarise(candidate_pairs = n(), max_weight = round(max(weights), 1))
+
+# the top candidate per case, in each set
+top_pairs <- all_pairs |>
+  arrange(desc(weights)) |>
+  distinct(variables, id_var.x, .keep_all = TRUE) |>
+  mutate(correct = truth_id.x == truth_id.y)
+
+thresholds <- tibble(threshold = seq(2, 24, by = 0.5))
+
+curves <- top_pairs |>
+  cross_join(thresholds) |>
+  filter(weights >= threshold) |>
+  group_by(variables, threshold) |>
+  summarise(links = n(), correct = sum(correct), .groups = "drop") |>
+  right_join(cross_join(tibble(variables = factor(set_names, levels = set_names)), thresholds),
+             by = c("variables", "threshold")) |>
+  mutate(links     = coalesce(links, 0L),       # no pair above this threshold
+         correct   = coalesce(correct, 0L),
+         precision = if_else(links > 0, correct / links, NA_real_),
+         recall    = correct / n_true,
+         f1        = 2 * precision * recall / (precision + recall)) |>
+  arrange(variables, threshold)
+
+best_by_set <- curves |>
+  filter(!is.na(f1)) |>
+  group_by(variables) |>
+  slice_max(f1, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  transmute(variables,
+            best_f1_threshold = threshold,
+            recall_at_best    = round(100 * recall, 1),
+            precision_at_best = round(100 * precision, 1))
+
+nvars_table <- set_sizes |>
+  left_join(curves |>
+              filter(threshold == 16) |>
+              transmute(variables,
+                        recall_at_16    = round(100 * recall, 1),
+                        precision_at_16 = round(100 * precision, 1)),
+            by = "variables") |>
+  left_join(curves |>
+              filter(threshold == 17) |>
+              transmute(variables, recall_at_17 = round(100 * recall, 1)),
+            by = "variables") |>
+  left_join(best_by_set, by = "variables") |>
+  arrange(variables)
+
+knitr::kable(nvars_table, format.args = list(big.mark = ","),
+             caption = "Recall and precision (%) at 16 and 17, and at each set's best-F1 threshold")
+```
+
+```{r nvars-plot, fig.height = 6.5, fig.cap = "Recall and precision by threshold for each comparison-variable set, keeping the best-weighted candidate per case. Dashed line: the default 16."}
+curves_long <- bind_rows(
+  curves |> transmute(variables, threshold, measure = "Recall (%)",    value = 100 * recall),
+  curves |> transmute(variables, threshold, measure = "Precision (%)", value = 100 * precision)
+) |>
+  filter(!is.na(value))
+
+ggplot(curves_long, aes(x = threshold, y = value, colour = variables)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = 16, linetype = "dashed", colour = aviary_cols[["slate"]]) +
+  facet_wrap(~ measure, ncol = 1, scales = "free_y") +
+  scale_colour_manual(values = unname(aviary_cols[c("slate", "satin", "evergreen",
+                                                    "wattle", "mud", "chestnut")])) +
+  labs(x = "Threshold", y = NULL, colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom") +
+  guides(colour = guide_legend(ncol = 2))
+```
+
+Reading across the 16 column:
+
+- **Three variables**: no pair can reach 16 -- the highest weight is
+  `r nvars_table$max_weight[1]`. A full `murmuration()` run at the default
+  would report `Pairs selected (threshold=TRUE): 0`, and that message means
+  exactly this: the threshold, not the data, is the problem.
+- **Four variables with `medicare10`**: the ceiling rises to
+  `r nvars_table$max_weight[2]`, yet recall at 16 is
+  `r nvars_table$recall_at_16[2]`%.
+- **A fifth variable barely moves it**: `r nvars_table$recall_at_16[4]`% with
+  postcode, and `r nvars_table$recall_at_16[6]`% with gender scored instead of
+  blocked -- at `r round(nvars_table$candidate_pairs[6] / nvars_table$candidate_pairs[4], 1)`
+  times the candidate pairs.
+- **`medicare09` instead of `medicare10`** lifts recall at 16 to
+  `r nvars_table$recall_at_16[3]`% with four variables and
+  `r nvars_table$recall_at_16[5]`% with five.
+- **At its own best-F1 threshold**, every set that includes Medicare recovers
+  `r min(nvars_table$recall_at_best[-1])`--`r max(nvars_table$recall_at_best[-1])`%
+  of true pairs at `r min(nvars_table$precision_at_best[-1])`% precision or
+  better, with best thresholds between
+  `r min(nvars_table$best_f1_threshold[-1])` and
+  `r max(nvars_table$best_f1_threshold[-1])`.
+
+Why does a five-variable linkage, the kind 16 was calibrated for, still miss
+`r round(100 - nvars_table$recall_at_16[4])`% of the true pairs at 16?
+Splitting its true pairs by what happened to the Medicare number answers
+that:
+
+```{r nvars-medicare}
+# the true pairs of the two five-variable (postcode) runs, by Medicare agreement
+true_5 <- bind_rows(
+  review_5_pc  |> as.data.frame() |> mutate(medicare_field = "medicare10"),
+  review_5_m09 |> as.data.frame() |> mutate(medicare_field = "medicare09")
+) |>
+  filter(truth_id.x == truth_id.y) |>
+  mutate(
+    medicare_status = case_when(
+      is.na(medicare10.x) | is.na(medicare10.y) ~ medicare_levels[4],
+      medicare10.x == medicare10.y              ~ medicare_levels[1],
+      medicare09.x == medicare09.y              ~ medicare_levels[2],
+      TRUE                                      ~ medicare_levels[3]
+    ),
+    medicare_status = factor(medicare_status, levels = medicare_levels)
+  )
+
+by_status_10 <- true_5 |>
+  filter(medicare_field == "medicare10") |>
+  group_by(medicare_status, .drop = FALSE) |>
+  summarise(true_pairs           = n(),
+            median_wt_medicare10 = round(median(weights), 1),
+            pct_ge_16_medicare10 = round(100 * mean(weights >= 16), 1))
+
+by_status_09 <- true_5 |>
+  filter(medicare_field == "medicare09") |>
+  group_by(medicare_status, .drop = FALSE) |>
+  summarise(median_wt_medicare09 = round(median(weights), 1),
+            pct_ge_16_medicare09 = round(100 * mean(weights >= 16), 1))
+
+medicare_by_field <- by_status_10 |>
+  left_join(by_status_09, by = "medicare_status") |>
+  mutate(pct_of_true_pairs = round(100 * true_pairs / sum(true_pairs)))
+
+knitr::kable(medicare_by_field,
+             caption = "True pairs by Medicare agreement: five variables (names, DOB, Medicare, postcode)")
+
+median_reissued <- medicare_by_field |> filter(medicare_status == medicare_levels[2]) |> pull(median_wt_medicare10)
+median_missing  <- medicare_by_field |> filter(medicare_status == medicare_levels[4]) |> pull(median_wt_medicare10)
+pct_agrees      <- medicare_by_field |> filter(medicare_status == medicare_levels[1]) |> pull(pct_of_true_pairs)
+pct_reissued    <- medicare_by_field |> filter(medicare_status == medicare_levels[2]) |> pull(pct_of_true_pairs)
+pct_missing     <- medicare_by_field |> filter(medicare_status == medicare_levels[4]) |> pull(pct_of_true_pairs)
+```
+
+So 16 is not failing at random. With five variables it keeps the true pairs
+whose Medicare number agrees and very little else. A reissued card costs a
+true pair enough weight to finish just below 16 (median
+`r median_reissued` with `medicare10`), and
+a missing number costs more (median `r median_missing`). In this linelist
+`r pct_missing`% of
+true pairs have Medicare missing on one side and a further
+`r pct_reissued`% carry
+a different card issue digit, so recall at 16 is capped near
+`r pct_agrees`% however
+many other fields agree. `medicare09` scores the reissued cards as agreeing
+and recovers that group; the Medicare-missing group stays out of reach at 16
+whichever field is used.
+
+That is what *calibrated for five variables with an agreeing Medicare number*
+means in practice. Where Medicare is complete and current on both sources, 16
+sits safely inside the valley. On a notification linelist, where it often is
+not, 16 is a high-precision, low-recall choice, and the score distribution --
+not the default -- has to set the threshold. Re-plot and re-choose whenever
+`compare_vars` changes, and whenever the completeness of the Medicare field
+does.
+
+***
+
+## (*)> Using `perch_before_linking = TRUE` inside `murmuration()`
 
 For the common one-step workflow, set `perch_before_linking = TRUE` in the
 `murmuration()` call. The sensitivity table is printed immediately after the EM
-model fits — before the threshold is applied — giving you a chance to review
+model fits -- before the threshold is applied -- giving you a chance to review
 before the linked dataset is produced.
 
 ```{r perch-inside, eval = FALSE}
 linked <- murmuration(
-  df1                  = cases_blocked,
-  df2                  = vax_blocked,
-  linkage_type         = "v2c",
+  data_x               = cases_blocked,
+  data_y               = air_covid_blocked,  # for a vaccine question: ONE vaccine type
+  linkage_type         = "cohort2event",
+  event_type           = "vaccination",
   event_date           = "onset_date",
   id_var               = "id_var",
   blocking_var         = "block1",
   compare_vars         = c("lettername1", "lettername2", "dob", "medicare10"),
-  threshold_value      = 17,
-  perch_before_linking = TRUE     # <-- prints the perch() table mid-linkage
+  threshold_value      = 8,
+  perch_before_linking = TRUE,     # <-- prints the perch() table mid-linkage
+  keep_pairs_pred      = TRUE      # <-- keeps the pairs for later re-exploration
 )
 ```
 
@@ -144,26 +698,225 @@ In a Quarto document or batch job (`interactive() == FALSE`), the table is
 printed to the console but the plot is suppressed and execution continues
 automatically. In an interactive session, the plot is displayed.
 
-If the table suggests a better threshold (say 19), re-run `murmuration()` with
-the new value. The EM model must be re-fitted — the scored pairs are not stored
-between calls. This is by design: `murmuration()` is a single-step function.
+If the table suggests a better threshold, there is no need to re-fit the EM
+model just to look. With `keep_pairs_pred = TRUE` the full scored-pairs table
+is attached to the result as `attr(linked, "pairs_pred")`, so both
+`murmuration_plot()` and `perch()` can be re-run against it:
 
----
+```{r reexplore, eval = FALSE}
+murmuration_plot(linked, threshold = 9)                     # a different cutoff
+perch(attr(linked, "pairs_pred"), n_records_primary = nrow(cases_blocked),
+      thresholds = seq(4, 20, by = 1))                       # re-sweep, no re-fit
+```
 
-## Clerical review zone
+Re-running `murmuration()` itself is only needed once you are ready to produce
+the final linked dataset under the new threshold -- `threshold_value` controls
+which pairs `link()` actually keeps in the output.
 
-In a formal two-threshold design (AIHW/WADLU practice), pairs in the 10–20
-zone are neither automatically accepted nor rejected — they are sent for human
-review. The `n_clerical` column in `perch()` output shows how many pairs fall
-in the review zone around each candidate threshold (default window: ±3 units).
+***
+
+## (*)> Clerical review zone
+
+In a formal two-threshold design (AIHW/WADLU practice), pairs in a band around
+the cutoff are neither automatically accepted nor rejected -- they are sent for
+human review. The `n_clerical` column in `perch()` output shows how many pairs
+fall in the review zone around each candidate threshold (default window: ±3
+units). Here, a band of ±3 around 8 holds
+`r format(clerical_8, big.mark = ",")` pairs,
+while the same band around the default 16 holds
+`r format(clerical_16, big.mark = ",")`.
 
 A large `n_clerical` relative to `n_above` means the threshold sits in a
-high-density region — small threshold changes would reclassify many pairs. This
-is a signal that you are sitting on a slope, not in a valley.
+high-density region -- small threshold changes would reclassify many pairs.
+This is a signal that you are sitting on a slope, not in a valley. Read that
+way, the band around 8 looks crowded too, but for a different reason: on this
+compressed four-variable scale the default ±3 band is wider than the valley
+itself, reaching down into the non-match tail below 6 and up into the
+Medicare-missing cluster near 10. A narrower `clerical_window` (say 2) is the
+fairer test here.
 
----
+***
 
-## Session information
+## (*)> Reviewing individual pairs {#reviewing-individual-pairs}
+
+`perch()` and `murmuration_plot()` describe the *distribution* of scores, not
+any individual pair. Two kinds of pair in this linkage deserve a closer look,
+and `review_4` already holds everything needed: the identifying fields from
+both sides, a mechanical `threshold` column (`weights >= 8`), and an empty
+`match_override` column (`NA`, `"match"` or `"non-match"`).
+
+**Family members on one card.** A pair above the threshold where the Medicare
+number agrees but both the first name and the date of birth differ is the
+signature of a sibling or partner, not of the person. The IRN joined in by
+`inspect_extra_vars` -- the 11th digit, the person's position on the card --
+is shown alongside:
+
+```{r family-flag}
+review_4 <- review_4 |>
+  mutate(
+    # above the threshold, same card, but a different first name AND date of birth
+    family_flag = threshold &
+      (medicare10.x == medicare10.y) %in% TRUE &
+      (dob.x != dob.y) %in% TRUE &
+      (lettername1.x != lettername1.y) %in% TRUE,
+    # ...and both records carry the IRN
+    irn_known = family_flag & !is.na(medicare_irn.x) & !is.na(medicare_irn.y)
+  )
+
+n_family_flag <- sum(review_4$family_flag)
+n_irn_known   <- sum(review_4$irn_known)
+
+review_4 |>
+  as.data.frame() |>
+  filter(family_flag) |>
+  select(lettername1.x, lettername1.y, lettername2.x, lettername2.y,
+         dob.x, dob.y, medicare_irn.x, medicare_irn.y, weights) |>
+  knitr::kable(digits = 1,
+               caption = "Above-threshold pairs sharing a Medicare card but not a first name or DOB")
+```
+
+Where both records carry an IRN it settles the question: people on one card
+share the 10-digit number but never the IRN (see
+`vignette("pre-linkage-quality")`). Only notifications that recorded all 11
+digits have one, so `r n_irn_known` of the `r n_family_flag` flagged
+pairs can be decided that way. For the rest, read down the list: most rows are
+clearly two different children or adults on one card, but a nickname or a
+single-letter typo can produce the same pattern for the right person -- which
+is why the flag is a prompt for a human decision, not a rule to apply blindly.
+Record each decision in `match_override`; in this teaching dataset `truth_id`
+stands in for the reviewer's judgement:
+
+```{r family-override}
+review_plain <- review_4    # kept unchanged for comparison below
+
+review_4 <- review_4 |>
+  mutate(
+    match_override = case_when(
+      irn_known   ~ if_else(medicare_irn.x == medicare_irn.y, "match", "non-match"),
+      family_flag ~ if_else(truth_id.x == truth_id.y, "match", "non-match"),  # the reviewer
+      TRUE        ~ match_override
+    ),
+    override_reason = case_when(
+      irn_known   ~ "Shared Medicare card: decided on the IRN",
+      family_flag ~ "Shared Medicare card: reviewed for family member",
+      TRUE        ~ NA_character_
+    )
+  )
+
+review_4 |>
+  as.data.frame() |>
+  filter(!is.na(override_reason)) |>
+  count(override_reason, match_override, name = "pairs") |>
+  knitr::kable()
+```
+
+**Several candidates for one case.** When more than one candidate is accepted
+for the same case, `murmuration()` keeps the highest-weighted one. That is the
+right default, but in a reviewed table it means a reviewer's `"match"` on a
+lower-weighted pair would still lose to a higher-weighted pair nobody looked
+at. An explicit, reproducible rule avoids that: keep the best accepted
+candidate per case -- a reviewed match first, then the highest weight -- and
+mark the others `"non-match"`.
+
+```{r best-candidate}
+# accepted = a reviewed match, or above the threshold and not reviewed;
+# rank within each case (reviewed match first, then weight) and keep the first
+runner_up_rows <- review_4 |>
+  as.data.frame() |>
+  mutate(row = row_number()) |>
+  filter(match_override %in% "match" | (is.na(match_override) & threshold)) |>
+  arrange(id_var.x, desc(match_override %in% "match"), desc(weights)) |>
+  filter(duplicated(id_var.x)) |>
+  pull(row)
+
+review_4 <- review_4 |>
+  mutate(
+    runner_up       = row_number() %in% runner_up_rows,
+    match_override  = if_else(runner_up, "non-match", match_override),
+    override_reason = if_else(runner_up, "Lower-ranked of several accepted candidates",
+                              override_reason)
+  )
+
+c(cases_with_several_candidates = n_distinct(review_4$id_var.x[review_4$runner_up]),
+  pairs_overridden = sum(!is.na(review_4$match_override)))
+```
+
+Finish the linkage by passing the reviewed table back in as
+`resume_from_pairs`. This applies the overrides, then runs exactly the same
+event-window logic a normal `murmuration()` call would. Passing the
+untouched copy instead reproduces the plain threshold-8 linkage without
+re-fitting anything:
+
+```{r resume}
+linked_plain <- murmuration(
+  data_x            = cases_blocked,   # the SAME frames that built review_4
+  data_y            = air_blocked,
+  linkage_type      = "cohort2event",
+  event_type        = "vaccination",
+  event_date        = "onset_date",
+  id_var            = "id_var",
+  threshold_value   = 8,
+  resume_from_pairs = review_plain     # no overrides: the plain threshold-8 linkage
+)
+linked_reviewed <- murmuration(
+  data_x            = cases_blocked,
+  data_y            = air_blocked,
+  linkage_type      = "cohort2event",
+  event_type        = "vaccination",
+  event_date        = "onset_date",
+  id_var            = "id_var",
+  threshold_value   = 8,
+  resume_from_pairs = review_4         # with the reviewer's decisions
+)
+
+# grade both against the truth
+air_truth <- air_blocked |>
+  select(id_var_y = id_var, truth_id_air = truth_id)
+
+bind_rows(
+  linked_plain    |> mutate(linkage = "Threshold 8, no review"),
+  linked_reviewed |> mutate(linkage = "Threshold 8, reviewed")
+) |>
+  left_join(air_truth, by = "id_var_y") |>
+  group_by(linkage) |>
+  summarise(links   = sum(!is.na(truth_id_air)),
+            correct = sum(truth_id_air == truth_id, na.rm = TRUE)) |>
+  mutate(precision = round(100 * correct / links, 1)) |>
+  knitr::kable(caption = "Precision (%) before and after review")
+```
+
+`cases_blocked`/`air_blocked` must be the exact data frames used to build
+`review_4` -- its `.x`/`.y` columns are row indices into them. `blocking_var`
+and `compare_vars` are not needed in this mode, since blocking and scoring
+have already happened. For a full worked review on a small, high-stakes
+linkage -- measles contacts, where every individual decision matters -- see
+`vignette("clinical-linkage-review")`.
+
+***
+
+## (*)> References
+
+1. Fellegi IP, Sunter AB. A theory for record linkage. J Am Stat Assoc.
+   1969;64(328):1183--1210.
+2. van der Laan DJ. reclin2: a toolkit for record linkage and deduplication.
+   R J. 2022;14(2):320--328.
+3. Roughan WH, Cavanagh-Ochiai B, Barnekow D, Lottkowitz K, Schafer K, Camadoo
+   L, Smoll NR. Infant respiratory syncytial virus (RSV) immunisation coverage
+   in an Australian regional area, 1 May 2024 -- 31 October 2025. Commun Dis
+   Intell. 2026;50. doi:10.33321/cdi.2026.50.031. **Applied**: about 10% of
+   its birth-register records carried identifier or date-of-birth errors and
+   were resolved with weighted-score matching, the situation in which a
+   threshold has to be chosen from the score distribution rather than assumed.
+4. Smoll NR, Al Imam MH, Shulz C, Booy R, Khandaker G. The effectiveness of
+   vaccination for preventing hospitalisation with COVID-19 in regional
+   Queensland: a data linkage study. Med J Aust. 2023;219(4):162--165.
+   doi:10.5694/mja2.52019. **Precedent**: its exact three-field key (first
+   name, last name, date of birth) is the deterministic counterpart of the
+   three-variable linkage graded above.
+
+***
+
+## (*)> Session information
 
 ```{r session}
 sessionInfo()

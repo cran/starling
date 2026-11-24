@@ -21,10 +21,10 @@
 #' so it can be saved, embedded in a Quarto report, or passed to downstream
 #' checks.
 #'
-#' @param data1 First data frame (typically the case/index dataset, \code{df1} in
+#' @param data1 First data frame (typically the case/index dataset, \code{data_x} in
 #'   \code{murmuration()}).
 #' @param data2 Second data frame (typically the vaccination/hospitalisation dataset,
-#'   \code{df2} in \code{murmuration()}).
+#'   \code{data_y} in \code{murmuration()}).
 #' @param linkage_vars Character vector of column names that will be used as
 #'   \code{compare_vars} in \code{murmuration()}. These are the variables
 #'   \code{preflight()} will assess most carefully.
@@ -126,7 +126,10 @@ preflight <- function(data1,
                           n_missing = NA_integer_, pct_missing = NA_character_,
                           stringsAsFactors = FALSE))
       }
-      n_miss <- sum(is.na(df[[v]]) | df[[v]] == "" | as.character(df[[v]]) == "NA")
+      # Compare as character: for a Date column `x == ""` is NA, which made the
+      # count NA (and raised junk flags) for dob, the date in every linkage key.
+      v_chr  <- as.character(df[[v]])
+      n_miss <- sum(is.na(df[[v]]) | v_chr %in% c("", "NA"))
       n_pres <- nrow(df) - n_miss
       data.frame(variable = v, dataset = df_name,
                  n_records = nrow(df), n_present = n_pres,

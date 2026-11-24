@@ -2,51 +2,77 @@
 % Please edit documentation in R/murmuration_plot.R
 \name{murmuration_plot}
 \alias{murmuration_plot}
-\title{Visualise Linkage Weight Distribution with Threshold Overlay}
+\title{Visualise Linkage Weight Distribution Across Blocking Strata}
 \usage{
 murmuration_plot(
-  pairs_pred,
-  threshold = 17,
+  data,
+  threshold = NULL,
+  blocking_var = NULL,
+  max_levels = 12L,
   weight_col = "weights",
   n_sample = 5000L,
   jitter_width = 0.3,
   point_alpha = 0.35,
   point_size = 1.2,
-  show_density = TRUE,
+  show_subtitle = TRUE,
   show_counts = TRUE,
   palette = "sch",
   title = NULL,
-  interactive = FALSE
+  interactive = FALSE,
+  pairs_pred = NULL
 )
 }
 \arguments{
-\item{pairs_pred}{A pairs object with a \code{weights} column — the output of
-\code{reclin2::predict.problink_em(m, pairs = pairs, add = TRUE)}. May also
-be a plain data frame with a numeric \code{weights} column.}
+\item{data}{The object returned by \code{\link{murmuration}} (preferred) — its
+attached \code{attr(x, "pairs_pred")} is used automatically. Also accepts a bare
+pairs-level data frame with a \code{weight_col} column directly, for a saved
+\code{pairs_pred} object or legacy pairs-scoring output produced outside
+\code{murmuration()}.}
 
-\item{threshold}{Numeric. The threshold value to display as a horizontal
-reference line. Default \code{17} (reasonable starting point for Australian
-surveillance linkage with Medicare + 2 names + DOB; see Details for guidance).}
+\item{threshold}{Numeric or \code{NULL} (default). \code{NULL} resolves to
+\code{attr(data, "threshold_value")} — whatever \code{threshold_value} was
+actually passed to \code{murmuration()} — falling back to \code{16} (the
+\code{murmuration()} default) with a
+\code{message()} if that attribute isn't available (e.g. a bare pairs-level data
+frame was supplied).}
+
+\item{blocking_var}{Character or \code{NULL} (default). Name of the column giving
+each pair's blocking stratum, used to position points along the x-axis (jittered
+within each stratum). \code{NULL} resolves to \code{attr(data, "blocking_var")};
+if that's unavailable either, falls back to a single unstratified column with a
+\code{message()} explaining how to enable per-stratum jittering.}
+
+\item{max_levels}{Integer. If more blocking strata are present than this,
+\code{max_levels - 1} are shown individually and the rest are pooled into an
+"Other" column, with a \code{warning()}. Any stratum containing at least one
+above-threshold pair is kept individually first; remaining slots go to the
+highest-volume zero-match strata — see Details, "Reading the per-stratum
+layout". This is consistent with the ecosystem's facet-count convention (see
+\code{bowerbird::roost_plot(facet_by = )}). Default \code{12}.}
 
 \item{weight_col}{Name of the column containing linkage weights. Default
 \code{"weights"}.}
 
-\item{n_sample}{Integer. Maximum number of points to plot (random sample drawn
-if the pairs object is larger than this). Plotting millions of points is slow
-and uninformative; the distribution shape is well-represented by 5 000–10 000
-points. Default \code{5000}.}
+\item{n_sample}{Integer. Maximum number of points to plot, in total. Above-threshold
+pairs are always kept in full; below-threshold pairs are subsampled
+proportionally \emph{within each blocking stratum} to fill whatever budget
+remains, so small strata aren't swamped out by large ones — see Details, "How
+points are sampled". Plotting millions of points is slow and uninformative; the
+below-threshold distribution shape is well-represented by 5,000–10,000 points in
+total. Default \code{5000}.}
 
-\item{jitter_width}{Numeric. Horizontal jitter width. Default \code{0.3}.}
+\item{jitter_width}{Numeric. Horizontal jitter width within each blocking stratum's
+column. Default \code{0.3}.}
 
 \item{point_alpha}{Numeric (0–1). Point transparency. Default \code{0.35}.}
 
 \item{point_size}{Numeric. Point size. Default \code{1.2}.}
 
-\item{show_density}{Logical. Overlay a right-margin density curve of the weight
-distribution? Default \code{TRUE}.}
+\item{show_subtitle}{Logical. Show the subtitle line (threshold, above/below
+counts, and the sampling note when applicable)? Default \code{TRUE}.}
 
-\item{show_counts}{Logical. Annotate the plot with the count of pairs above
-and below the threshold? Default \code{TRUE}.}
+\item{show_counts}{Logical. Label each blocking stratum's column with its pair
+count (\code{n = ...})? Default \code{TRUE}.}
 
 \item{palette}{Character. Colour palette for match/non-match zones:
 \code{"sch"} (Sunshine Coast HHS greens — default), \code{"default"}
@@ -56,6 +82,13 @@ and below the threshold? Default \code{TRUE}.}
 
 \item{interactive}{Logical. Return a \pkg{plotly} object (\code{TRUE}) or a
 \pkg{ggplot2} object (\code{FALSE}, default).}
+
+\item{pairs_pred}{\code{Deprecated}. Pre-1.2.0 name for \code{data}, when it took
+only a raw pairs-level object. Positional calls (\code{murmuration_plot(pp, ...)})
+are unaffected by the rename and never need this — it exists solely to catch old
+calls that named the argument explicitly (\code{pairs_pred = pp}), which emit a
+\code{warning()} and are routed to \code{data} for now. Will be removed in a
+future release; update calls to use \code{data} instead.}
 }
 \value{
 A \pkg{ggplot2} object (\code{interactive = FALSE}) or a \pkg{plotly}
@@ -66,28 +99,88 @@ A \pkg{ggplot2} object (\code{interactive = FALSE}) or a \pkg{plotly}
 split momentarily into two layers — the dense, high-altitude core of confirmed
 companions and the looser, lower-flying fringe of uncertain travellers — before
 the whole shape resolves again. \code{murmuration_plot()} captures exactly that
-split: the linkage weight distribution separates into a high-score cluster of
-likely true matches at the top, a low-score cluster of likely non-matches at the
-bottom, and — critically — a gap or overlap zone in between that tells you
-whether your threshold is well-placed or needs adjustment.
+split, and now shows whether it holds up flock by flock: the linkage weight
+distribution separates into a high-score cluster of likely true matches, a
+low-score cluster of likely non-matches, and a threshold line between them —
+broken out by blocking stratum so a threshold that looks fine pooled across the
+whole dataset can be checked for strata where it quietly performs worse.
 
-Generates a jittered scatter plot of Fellegi-Sunter linkage weights from a
-scored pairs object (the output of \code{predict()} in the \pkg{reclin2}
-workflow, before \code{select_threshold()} is called). Weights are plotted
-on the y-axis with jitter on the x-axis for readability. A horizontal line
-marks the chosen threshold, with regions above and below shaded to distinguish
-likely matches from likely non-matches. Optionally overlays a density curve to
-highlight the bimodal (match/non-match) distribution.
-
-Use this plot before finalising \code{threshold_value} in
-\code{\link{murmuration}} to confirm that the threshold sits in the natural
-valley between the two score clusters. If the valley is not visible (scores
-form a unimodal distribution), this is a signal that the linkage variables
-or blocking strategy needs revision.
+Generates a jittered scatter plot of Fellegi-Sunter linkage weights, positioned
+along the x-axis by the \code{blocking_var} stratum each candidate pair belongs to
+(jittered within each stratum for readability), with a horizontal line marking the
+chosen threshold and shaded regions distinguishing likely matches from likely
+non-matches.
 }
 \details{
-## Threshold guidance for Australian public health linkage
+## Running directly off murmuration()'s own output
+As of starling 1.2.0, \code{murmuration(method = "probabilistic")} attaches its
+full candidate-pairs scoring table to its own return value as
+\code{attr(x, "pairs_pred")}, along with the \code{blocking_var} and
+\code{threshold_value} actually used. \code{murmuration_plot()} reads all three
+straight off that object:
+\preformatted{
+linked <- murmuration(data_x, data_y, ..., blocking_var = "gender", threshold_value = 16)
+murmuration_plot(linked)                 # threshold and blocking_var picked up
+                                          # automatically
+murmuration_plot(linked, threshold = 14) # explore a different cutoff without
+                                          # re-running murmuration()
+}
+There is no need to hand-roll the underlying pairs-scoring pipeline yourself just
+to see the score distribution. \code{data} can also be a bare pairs-level data
+frame with a \code{weights} column directly (a saved \code{attr(x, "pairs_pred")},
+or output from the legacy raw pairs-scoring workflow) — see \code{data} below.
 
+\code{method = "deterministic"} linkage has no Fellegi-Sunter score to plot
+(\code{weights} is \code{NA} throughout by design — see \code{\link{murmuration}}):
+passing its output here is a \code{stop()}, not a silent empty plot.
+
+## How points are sampled
+With large datasets, plotting every candidate pair is slow and not usually any
+more informative than a representative sample — but a sample taken uniformly
+across the whole dataset (or even just within each blocking stratum) can be
+actively misleading here: above-threshold pairs are often a tiny fraction of all
+candidate pairs — well under 1\% is common — and a uniform sample can easily miss
+every single one of them, making a real, if small, separation look like no
+separation at all. Sampling is therefore asymmetric:
+\itemize{
+  \item Every above-threshold pair is kept, in full, no matter how rare —
+    unless there are more of them than \code{n_sample} itself, an unusual case
+    in which they are themselves subsampled down to \code{n_sample}.
+  \item The (usually much larger) below-threshold population is subsampled to
+    fill whatever budget remains, proportionally \emph{within each blocking
+    stratum} so small strata aren't crowded out by large ones.
+}
+When this asymmetric sampling is active, the plot subtitle says so explicitly
+("every above-threshold pair shown; below-threshold sampled") when
+\code{show_subtitle = TRUE}. Above-threshold points are also drawn larger, more
+opaque, and as a different shape (a triangle rather than a circle) than
+below-threshold points, so they stay visible even when very few of them exist
+against a large background cloud. The header counts (n above/below threshold) are
+always computed from the complete, unsampled data — only the scatter of
+individual points is affected by \code{n_sample}.
+
+## Reading the per-stratum layout
+Strata are ordered left to right by how many above-threshold pairs they
+contain — most first, tapering to zero — rather than by raw size, so where
+matches actually concentrate is visible at a glance instead of requiring a
+scan across every column. Ties (typically among strata with no
+above-threshold pairs at all) are broken by total pair volume, largest
+first. "Other" is always last, regardless of its own aggregate count, since
+it is a heterogeneous pool rather than a single meaningful stratum. If
+\code{max_levels} forces some strata to be pooled, any stratum containing
+at least one above-threshold pair is kept individually in preference to a
+larger zero-match stratum — see \code{max_levels}.
+
+Each blocking stratum (e.g. each level of \code{gender}, or each \code{postcode}
+block) gets its own jittered column of points, all sharing the same y-axis and
+threshold line. A well-behaved threshold shows the same match/non-match separation
+in every column; a stratum where points cluster near the threshold line, or where
+the "likely non-match" cloud creeps above it, is a sign that stratum's identifiers
+are noisier and may need a different \code{blocking_var}, additional
+\code{compare_vars}, or a stratum-specific threshold applied via a separate
+\code{murmuration()} call and a manual \code{dplyr::bind_rows()}.
+
+## Threshold guidance for Australian public health linkage
 The Fellegi-Sunter weights produced by the EM algorithm are log-likelihood
 ratios, not fixed absolute scores, so the "right" threshold is
 dataset-specific. That said, common reference points for Australian population
@@ -96,34 +189,69 @@ health work (Medicare, 2 names, DOB) are:
 | Threshold | Practical meaning |
 |---|---|
 | 8–12 | High sensitivity, lower specificity — suitable when recall matters more than precision (e.g. small datasets, rare disease surveillance) |
-| 12–17 | Balanced — typical starting point for surveillance linkage with a complete variable set |
+| 12–17 | Balanced — typical starting point for surveillance linkage with a complete variable set (the \code{murmuration()} default, 16, assumes 5 comparison variables with an agreeing Medicare number) |
 | 17–22 | High specificity — suitable when false matches are especially costly (e.g. VE studies where false vaccination attribution biases the estimate) |
 | > 22 | Very conservative — consider adding clerical review for records in the 17–22 range |
 
 The most principled approach is to look at the weight distribution (this plot)
-and choose the threshold at the **lowest density point** between the two modes.
-If the two modes overlap substantially, your variable set may lack discriminating
-power for this dataset — see \code{\link{preflight}} for diagnostic guidance.
+and choose the threshold at the **lowest density point** between the two modes,
+checked across every blocking stratum in turn rather than only in the pooled
+picture. If the two modes overlap substantially, your variable set may lack
+discriminating power for this dataset — see \code{\link{preflight}} for
+diagnostic guidance.
 }
 \examples{
-\dontrun{
-# Standard reclin2 workflow, with plot inserted before threshold selection
-pairs <- reclin2::pair_blocking(df1, df2, blocking_var)
-reclin2::compare_pairs(pairs, on = compare_vars,
-  default_comparator = reclin2::jaro_winkler(0.9), inplace = TRUE)
-m          <- reclin2::problink_em(reformulate(compare_vars), data = pairs)
-pairs_pred <- predict(m, pairs = pairs, add = TRUE)
-
-# Inspect the weight distribution before committing to a threshold
-murmuration_plot(pairs_pred, threshold = 17)
-
-# Try a different threshold, interactively
-murmuration_plot(pairs_pred, threshold = 14, interactive = TRUE)
-
-# Greyscale for a journal figure
-murmuration_plot(pairs_pred, threshold = 17, palette = "grey")
+\donttest{
+# Minimal, fully self-contained example: a bare pairs-level data frame
+# with just a weights column (e.g. a saved attr(x, "pairs_pred")) -- the
+# "Also accepts a bare pairs-level data frame" path documented in @param
+# data above -- so this is a genuine, runnable demonstration that needs
+# neither murmuration() nor reclin2 to have actually run.
+pairs_toy <- data.frame(weights = c(2, 4, 5, 18, 21, 25, 3, 19, 11, 16))
+murmuration_plot(pairs_toy, threshold = 16)
 }
 
+\dontrun{
+# The following illustrate running directly off murmuration()'s own
+# output -- kept as \dontrun{} rather than \donttest{} because they need
+# a real reclin2-scored pairs table (via murmuration(method =
+# "probabilistic")) to show per-stratum jittering, threshold exploration,
+# and asymmetric sampling meaningfully; a handful of synthetic rows would
+# not exercise any of that. The \donttest{} example above already
+# demonstrates the core plotting function runs correctly end to end.
+
+# Preferred workflow: pass murmuration()'s own output straight in
+linked <- murmuration(dx_clean, vax_clean,
+  linkage_type = "cohort2event", event_type = "vaccination",
+  event_date = "onset_date", id_var = "identity",
+  blocking_var = "gender",
+  compare_vars = c("lettername1", "lettername2", "dob"),
+  threshold_value = 16)
+
+murmuration_plot(linked)                     # threshold + blocking_var automatic
+murmuration_plot(linked, threshold = 14)     # explore a different cutoff
+murmuration_plot(linked, max_levels = 6)     # collapse a fine blocking_var
+murmuration_plot(linked, palette = "grey")   # greyscale for a journal figure
+murmuration_plot(linked, interactive = TRUE) # plotly, for Shiny/Quarto HTML
+
+# Advanced: the pairs-level table on its own, saved for later
+pp <- attr(linked, "pairs_pred")
+murmuration_plot(pp, threshold = 16, blocking_var = "gender")
+}
+
+}
+\references{
+Roughan WH, Cavanagh-Ochiai B, Barnekow D, Lottkowitz K, Schafer K, Camadoo L,
+Smoll NR. Infant respiratory syncytial virus (RSV) immunisation coverage in an
+Australian regional area, 1 May 2024 - 31 October 2025. \emph{Commun Dis Intell}
+2026;50. \doi{10.33321/cdi.2026.50.031}. \strong{Applied, illustrative.} About 10\%
+of this study's birth-register records carried identifier or date-of-birth errors
+and were resolved with weighted-score matching rather than an exact key —
+\code{murmuration_plot()} is built for inspecting exactly that situation, checking
+whether a candidate threshold holds up once messier records are in the mix, rather
+than accepting a single cutoff on faith. See \code{\link{murmuration}} for the
+full \code{@references} entry and the deterministic-linkage precedent
+(Smoll et al. 2023), which has no score distribution to plot here.
 }
 \seealso{
 \code{\link{murmuration}}, \code{\link{preflight}}

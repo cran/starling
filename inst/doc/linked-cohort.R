@@ -1,169 +1,501 @@
 ## ----setup, include = FALSE---------------------------------------------------
+# The worked data (the clutch datasets) live in mudnester; if it is not
+# installed the vignette stops cleanly after this point.
+has_mudnester <- requireNamespace("mudnester", quietly = TRUE) &&
+  utils::packageVersion("mudnester") >= "0.9.0"   # the clutch datasets arrived in 0.9.0
 knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment  = "#>",
-  message  = FALSE,
-  warning  = FALSE,
-  eval     = FALSE,      # chunks are illustrative: reclin2 not available at build time
+  fig.retina = 1,   # 1x figures: keeps the built HTML small for CRAN
+  collapse   = TRUE,
+  comment    = "#>",
+  message    = FALSE,
+  warning    = FALSE,
   fig.width  = 8,
-  fig.height = 5
+  fig.height = 4.5,
+  eval       = has_mudnester
 )
 
+## ----needs-mudnester, echo = FALSE, eval = !has_mudnester, results = "asis"----
+# cat("This vignette uses the clutch datasets from the mudnester package. Install mudnester (>= 0.9.0) to run it.")
+# knitr::knit_exit()
+
 ## ----load---------------------------------------------------------------------
-# library(starling)
-# 
-# data(cases_notifiable)
-# data(vax_air)
-# 
-# cat("Cases linelist:      ", nrow(cases_notifiable), "records\n")
-# cat("Vaccination register:", nrow(vax_air),           "records\n")
-# cat("True matches (known):", sum(!is.na(cases_notifiable$true_link_id)), "\n")
+library(starling)
+library(mudnester)   # clean_the_nest() and the clutch_* datasets
+library(dplyr)
+library(ggplot2)
+
+aviary_cols <- c(satin = "#325D88", chestnut = "#86251C", wattle = "#D8A31A",
+                 evergreen = "#08403B", mud = "#A67D4C", slate = "#3E3F3A")
+
+## ----clean--------------------------------------------------------------------
+cases_raw <- clutch_cases |>
+  mutate(
+    onset_imputed = is.na(onset_date),                  # keep a flag
+    onset_date    = coalesce(onset_date, specimen_date) # fall back to the specimen date
+  )
+
+cases_clean <- clean_the_nest(
+  cases_raw,
+  data_type   = "cases",
+  drop_eggs   = TRUE,
+  id_var      = "notification_id",
+  diagnosis   = "condition",
+  lettername1 = "first_name",
+  lettername2 = "surname",
+  dob         = "date_of_birth",
+  gender      = "sex",
+  postcode    = "postcode",
+  medicare    = "medicare_number",
+  onset_date  = "onset_date",
+  keep_vars   = c("truth_id", "onset_imputed")
+)
+
+## ----clean-air----------------------------------------------------------------
+air_covid_raw <- clutch_air |>
+  filter(antigen == "COVID-19")   # the one vaccine this analysis is about
+
+air_covid <- clean_the_nest(
+  air_covid_raw,
+  data_type     = "vaccination",
+  lie_nest_flat = TRUE,          # one row per person: vax_date_1, vax_type_1, ...
+  drop_eggs     = TRUE,
+  id_var        = "air_id",
+  lettername1   = "given_name",
+  lettername2   = "family_name",
+  dob           = "date_of_birth",
+  gender        = "sex",
+  postcode      = "postcode",
+  medicare      = "medicare_card",
+  medicare_irn  = "medicare_irn",  # the AIR stores the IRN in its own column
+  vax_type      = "antigen",
+  vax_date      = "date_of_service",
+  keep_vars     = "truth_id"
+)
+
+cases_clean |>
+  count(diagnosis)
+c(covid_doses = nrow(air_covid_raw), people_with_a_covid_dose = nrow(air_covid))
 
 ## ----preflight----------------------------------------------------------------
-# audit <- preflight(
-#   data1        = cases_notifiable,
-#   data2        = vax_air,
-#   linkage_vars = c("lettername1", "lettername2", "dob", "medicare10"),
-#   id_col1      = "id_var",
-#   id_col2      = "id_var",
-#   date_cols    = c("dob", "onset_date"),
-#   medicare_col = "medicare10"
-# )
+cases_covid_clean <- cases_clean |>
+  filter(diagnosis == "COVID-19")
+
+audit <- preflight(
+  data1        = cases_covid_clean,
+  data2        = air_covid,
+  linkage_vars = c("lettername1", "lettername2", "dob", "medicare10"),
+  id_col1      = "id_var",
+  id_col2      = "id_var",
+  date_cols    = c("dob", "onset_date"),
+  medicare_col = "medicare10",
+  verbose      = FALSE
+)
+
+knitr::kable(audit$completeness, caption = "Completeness of the linkage variables")
+audit$flags
 
 ## ----medicare-----------------------------------------------------------------
-# # Validate cases
-# cases_checked <- check_medicare(cases_notifiable,
-#                                 medicare_col = "medicare10",
-#                                 output_col   = "medicare_valid",
-#                                 verbose      = TRUE)
-# 
-# # Confirm AIR Medicare numbers are all valid
-# vax_checked <- check_medicare(vax_air,
-#                               medicare_col = "medicare10",
-#                               output_col   = "medicare_valid",
-#                               verbose      = TRUE)
-# 
-# # Replace corrupted Medicare numbers with NA before linkage
-# # so they don't negatively score a true match
-# cases_checked$medicare10 <- ifelse(
-#   cases_checked$medicare_valid == 1L,
-#   cases_checked$medicare10,
-#   NA_character_
-# )
+cases_checked <- cases_clean |>
+  check_medicare(medicare_col = "medicare10", output_col = "medicare_valid",
+                 verbose = FALSE) |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10))
+
+air_checked <- air_covid |>
+  check_medicare(medicare_col = "medicare10", output_col = "medicare_valid",
+                 verbose = FALSE) |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10))
+
+bind_rows(
+  cases_checked |> mutate(dataset = "clutch_cases"),
+  air_checked   |> mutate(dataset = "clutch_air (COVID-19)")
+) |>
+  group_by(dataset) |>
+  summarise(
+    valid          = sum(medicare_valid %in% 1L),
+    fails_checksum = sum(medicare_valid %in% 0L),
+    missing        = sum(is.na(medicare_valid))
+  ) |>
+  knitr::kable(caption = "Medicare numbers after check_medicare(): invalid ones are set to NA")
 
 ## ----flock--------------------------------------------------------------------
-# # Extract birth year for composite blocking
-# cases_blocked <- flock(cases_checked,
-#                        block1_vars    = "gender",
-#                        block2_vars    = "gender",
-#                        block3_vars    = "postcode",
-#                        birth_year_col = "dob")
-# 
-# vax_blocked   <- flock(vax_checked,
-#                        block1_vars    = "gender",
-#                        block2_vars    = "gender",
-#                        block3_vars    = "postcode",
-#                        birth_year_col = "dob")
-# 
-# # Summary of blocking key distributions
-# cat("block1 (gender) — unique values in cases:",
-#     dplyr::n_distinct(cases_blocked$block1), "\n")
-# cat("block3 (postcode) — unique values in cases:",
-#     dplyr::n_distinct(cases_blocked$block3), "\n")
+cases_blocked <- flock(cases_checked,
+                       block1_vars    = c("gender", "birth_year"),
+                       birth_year_col = "dob")
+air_blocked   <- flock(air_checked,
+                       block1_vars    = c("gender", "birth_year"),
+                       birth_year_col = "dob")
 
-## ----perch-standalone, eval = FALSE-------------------------------------------
-# # This would require running the EM model first —
-# # see the murmuration() call below which does this in one step.
-# # For standalone use on a pre-scored pairs object:
-# 
-# # pairs <- reclin2::pair_blocking(cases_blocked, vax_blocked, "block1")
-# # reclin2::compare_pairs(pairs,
-# #   on = c("lettername1", "lettername2", "dob", "medicare10"),
-# #   default_comparator = reclin2::jaro_winkler(0.9), inplace = TRUE)
-# # m          <- reclin2::problink_em(
-# #   ~ lettername1 + lettername2 + dob + medicare10, data = pairs)
-# # pairs_pred <- predict(m, pairs = pairs, add = TRUE)
-# #
-# # perch(pairs_pred, n_records_df1 = nrow(cases_blocked),
-# #       thresholds = seq(8, 25, by = 1))
+cases_covid <- cases_blocked |>
+  filter(diagnosis == "COVID-19")
 
-## ----murmuration--------------------------------------------------------------
-# linked <- murmuration(
-#   df1                  = cases_blocked,
-#   df2                  = vax_blocked,
-#   linkage_type         = "v2c",
-#   event_date           = "onset_date",
-#   id_var               = "id_var",
-#   blocking_var         = "block1",
-#   compare_vars         = c("lettername1", "lettername2", "dob", "medicare10"),
-#   threshold_value      = 17,
-#   perch_before_linking = FALSE,   # set TRUE in interactive sessions to inspect
-#   days_allowed_before_event = 14,
-#   clean_eggs           = TRUE
-# )
-# 
-# cat("Linked records:      ", nrow(linked), "\n")
-# cat("With vaccination:    ", sum(!is.na(linked$vax_date_1)), "\n")
-# cat("Without vaccination: ", sum( is.na(linked$vax_date_1)), "\n")
+c(covid_cases = nrow(cases_covid),
+  air_people  = nrow(air_blocked),
+  strata      = length(intersect(cases_covid$block1, air_blocked$block1)))
 
-## ----plot, fig.cap = "Linkage weight distribution. The threshold (dashed line) should sit in the valley between the two score clusters."----
-# # The linked output retains the weights column when clean_eggs = TRUE
-# # For the visualisation, we use the weights from the linked data frame
-# if ("weights" %in% names(linked)) {
-#   murmuration_plot(linked, threshold = 17, show_density = FALSE,
-#                    palette = "sch")
-# }
+## ----link-16------------------------------------------------------------------
+linked_16 <- murmuration(
+  data_x          = cases_covid,     # one row per COVID-19 case
+  data_y          = air_blocked,     # one row per AIR person, COVID-19 doses only
+  linkage_type    = "cohort2event",  # a cohort linked to an event stream...
+  event_type      = "vaccination",   # ...of vaccinations
+  event_date      = "onset_date",    # each case's own anchor date
+  id_var          = "id_var",        # the case identifier, kept on every row
+  blocking_var    = "block1",        # only pairs of the same gender and birth year
+  compare_vars    = c("lettername1", "lettername2", "dob", "medicare10"),
+  # threshold_value not set: the default, 16
+  vax_window      = list(days_before = 14, days_after = 0, lookback_days = 182),
+  keep_pairs_pred = TRUE             # keep every scored pair for the plots
+)
+
+## ----perch--------------------------------------------------------------------
+pp_16 <- attr(linked_16, "pairs_pred") |>
+  as.data.frame()
+
+# the most a pair can score when Medicare is missing on one side
+max_weight_no_medicare <- pp_16 |>
+  filter(is.na(medicare10)) |>
+  pull(weights) |>
+  max()
+
+sweep <- perch(pp_16,
+               n_records_primary = nrow(cases_covid),
+               thresholds        = seq(4, 20, by = 1),
+               report            = FALSE,
+               plot              = FALSE)
+
+knitr::kable(sweep[, c("threshold", "n_above", "n_clerical", "link_rate", "reference")],
+             caption = "Accepted pairs and clerical burden at each candidate threshold")
+
+## ----plot-16, fig.cap = "Candidate-pair weights at the default threshold of 16. The upper cluster (all four fields agree) sits above 16; the true matches with a reissued card or no Medicare number on one side sit between about 10 and 13, entirely below the line."----
+murmuration_plot(linked_16, max_levels = 10)
+
+## ----link-8-------------------------------------------------------------------
+linked_cov <- murmuration(
+  data_x          = cases_covid,     # one row per COVID-19 case
+  data_y          = air_blocked,     # one row per AIR person, COVID-19 doses only
+  linkage_type    = "cohort2event",
+  event_type      = "vaccination",
+  event_date      = "onset_date",    # the window is measured back from onset
+  id_var          = "id_var",
+  blocking_var    = "block1",        # gender + birth year
+  compare_vars    = c("lettername1", "lettername2", "dob", "medicare10"),
+  threshold_value = 8,               # the valley seen in Step 4
+  vax_window      = list(days_before = 14,     # a dose counts from 14 days old...
+                         days_after = 0,
+                         lookback_days = 182), # ...until 182 days old
+  suffix          = "_cov",          # tag every column this call adds
+  keep_pairs_pred = TRUE
+)
+
+bind_rows(
+  linked_16  |> summarise(threshold     = 16,
+                          linked_to_air = sum(!is.na(id_var_y)),
+                          current_dose  = sum(vaccination_status == "Vaccinated")),
+  linked_cov |> summarise(threshold     = 8,
+                          linked_to_air = sum(!is.na(id_var_y_cov)),
+                          current_dose  = sum(vaccination_status_cov == "Vaccinated"))
+) |>
+  knitr::kable(caption = "COVID-19 cases linked to an AIR record, and with a dose 14-182 days before onset")
+
+## ----vax-status---------------------------------------------------------------
+linked_cov |>
+  count(vaccination_status_cov, total_valid_vax_cov, name = "cases") |>
+  knitr::kable(caption = "vaccination_status against the number of in-window doses (threshold 8)")
+
+## ----plot-8, fig.cap = "Linkage weight distribution at threshold 8, jittered by blocking stratum (gender + birth year). Above-threshold pairs are drawn as triangles."----
+murmuration_plot(linked_cov, max_levels = 10, palette = "sch")
 
 ## ----validate-----------------------------------------------------------------
-# # Recall: proportion of true matches recovered
-# true_positives <- sum(
-#   !is.na(linked$true_link_id) &
-#   !is.na(linked$id_var_df2) &
-#   linked$true_link_id == linked$id_var_df2,
-#   na.rm = TRUE
-# )
-# total_true_matches <- sum(!is.na(cases_notifiable$true_link_id))
-# recall <- true_positives / total_true_matches
-# 
-# # Precision: proportion of accepted links that are true matches
-# total_links <- sum(!is.na(linked$id_var_df2))
-# precision   <- true_positives / total_links
-# 
-# cat(sprintf("Recall:    %.1f%%  (%d / %d true matches recovered)\n",
-#             recall * 100, true_positives, total_true_matches))
-# cat(sprintf("Precision: %.1f%%  (%d / %d links are true matches)\n",
-#             precision * 100, true_positives, total_links))
-# cat(sprintf("F1 score:  %.3f\n",
-#             2 * precision * recall / (precision + recall)))
+# the truth_id behind each matched AIR record -- used only to grade the links
+air_truth <- air_blocked |>
+  select(id_var_y_cov = id_var, truth_id_air = truth_id)
+
+grading <- linked_cov |>
+  left_join(air_truth, by = "id_var_y_cov") |>
+  summarise(
+    n_links   = sum(!is.na(id_var_y_cov)),
+    n_correct = sum(truth_id == truth_id_air, na.rm = TRUE)
+  )
+n_links   <- grading$n_links
+n_correct <- grading$n_correct
+n_true    <- cases_covid |>
+  filter(truth_id %in% air_blocked$truth_id) |>
+  nrow()
+
+tibble(
+  measure = c("Accepted links", "Correct links", "Cases with a true AIR record",
+              "Precision (%)", "Recall (%)"),
+  value   = c(n_links, n_correct, n_true,
+              round(100 * n_correct / n_links, 1),
+              round(100 * n_correct / n_true, 1))
+) |>
+  knitr::kable()
+
+## ----multi-candidate----------------------------------------------------------
+# every candidate pair above the threshold, with both sides' truth_id
+above <- attr(linked_cov, "pairs_pred") |>
+  as.data.frame() |>
+  filter(weights >= 8) |>
+  select(row_x = .x, row_y = .y, weights) |>
+  mutate(truth_x = cases_covid$truth_id[row_x],
+         truth_y = air_blocked$truth_id[row_y])
+
+# cases with two or more candidates
+multi_x <- above |>
+  count(row_x) |>
+  filter(n > 1) |>
+  pull(row_x)
+
+# what murmuration() keeps: the highest-weighted candidate per case
+best <- above |>
+  arrange(desc(weights)) |>
+  distinct(row_x, .keep_all = TRUE)
+
+best_multi <- best |>
+  filter(row_x %in% multi_x)
+
+tibble(
+  measure = c("Cases with 2+ candidates above 8",
+              "  of which the highest-weighted candidate is the right person",
+              "Precision of murmuration()'s links (%)",
+              "Precision recomputed from the pairs, highest weight per case (%)"),
+  value   = c(length(multi_x),
+              sum(best_multi$truth_x == best_multi$truth_y),
+              round(100 * n_correct / n_links, 1),
+              round(100 * mean(best$truth_x == best$truth_y), 1))
+) |>
+  knitr::kable()
+
+## ----hospital-clean-----------------------------------------------------------
+hosp_raw <- clutch_hospital |>
+  filter(care_type == "Acute") |>                      # no maternity or newborn episodes
+  mutate(sex = case_when(sex == "Male"   ~ "M",        # the hospital codes sex in full;
+                         sex == "Female" ~ "F"))       # every other source uses M/F
+
+hosp_clean <- clean_the_nest(
+  hosp_raw,
+  data_type      = "hospital",
+  drop_eggs      = TRUE,
+  id_var         = "ur_number",
+  event_id_var   = "episode_id",
+  lettername1    = "given_name",
+  lettername2    = "family_name",
+  dob            = "birth_date",
+  gender         = "sex",
+  postcode       = "postcode",
+  medicare       = "medicare_no",
+  admission_date = "admit_date",
+  discharge_date = "separation_date",
+  hospital       = "facility",
+  icd_code       = "principal_diagnosis",
+  drg            = "drg",
+  icu_date       = "icu_date",
+  icu_hours      = "icu_hours",
+  dod            = "death_date",   # age at admission is derived from dob and admit_date
+  keep_vars      = c("truth_id", "diagnosis_codes")
+)
+
+hosp_blocked <- hosp_clean |>
+  check_medicare(medicare_col = "medicare10", output_col = "medicare_valid",
+                 verbose = FALSE) |>
+  mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10)) |>
+  flock(block1_vars    = c("gender", "birth_year"),
+        birth_year_col = "dob")
+
+## ----hospital-link------------------------------------------------------------
+linked_hosp <- murmuration(
+  data_x                    = cases_blocked,      # every case, all four conditions
+  data_y                    = hosp_blocked,       # acute episodes
+  linkage_type              = "cohort2event",
+  event_type                = "hospitalisation",
+  event_date                = "onset_date",
+  id_var                    = "id_var",
+  blocking_var              = "block1",           # gender + birth year
+  compare_vars              = c("lettername1", "lettername2", "dob", "medicare10"),
+  threshold_value           = 8,
+  days_allowed_before_event = 7,                  # admitted up to 7 days before onset...
+  days_allowed_after_event  = 14,                 # ...or up to 14 days after
+  days_between_onset_death  = 30,                 # a death within 30 days of onset
+  suffix                    = "_hosp",
+  keep_pairs_pred           = TRUE
+)
+
+linked_hosp |>
+  summarise(cases              = n(),
+            linked_to_hospital = sum(!is.na(id_var_y_hosp)),
+            admitted_in_window = sum(admission_outcome_hosp == "Admission")) |>
+  knitr::kable(caption = "Cases linked to an acute hospital record, and admitted in the window")
+
+## ----hospital-plot, fig.cap = "Case-to-hospital candidate-pair weights at threshold 8."----
+murmuration_plot(linked_hosp, max_levels = 10)
+
+## ----severity-----------------------------------------------------------------
+# the truth: an acute admission of the same person within the same window
+truth_adm <- cases_blocked |>
+  select(id_var, truth_id, onset_date) |>
+  inner_join(hosp_clean |> select(truth_id, admission_date),
+             by = "truth_id", relationship = "many-to-many") |>
+  filter(admission_date >= onset_date - 7,
+         admission_date <= onset_date + 14)
+
+linked_hosp <- linked_hosp |>
+  mutate(admitted       = admission_outcome_hosp == "Admission",
+         icu            = icu_outcome_hosp == "ICU Admission",
+         died           = death_outcome_hosp == "Died",
+         admitted_truth = id_var %in% truth_adm$id_var)
+
+severity <- linked_hosp |>
+  group_by(condition = diagnosis) |>
+  summarise(cases          = n(),
+            admitted       = sum(admitted),
+            admitted_truth = sum(admitted_truth),
+            icu            = sum(icu, na.rm = TRUE),
+            died_30d       = sum(died, na.rm = TRUE)) |>
+  mutate(chr_pct       = round(100 * admitted / cases, 1),
+         chr_truth_pct = round(100 * admitted_truth / cases, 1),
+         cfr_pct       = round(100 * died_30d / cases, 2))
+
+knitr::kable(severity, caption = "Case-hospitalisation (CHR) and case-fatality (CFR) by condition, linked vs truth")
+
+## ----severity-plot, fig.height = 3.5------------------------------------------
+chr_long <- bind_rows(
+  severity |> transmute(condition, source = "Linked (threshold 8)", chr = chr_pct),
+  severity |> transmute(condition, source = "Truth",                chr = chr_truth_pct)
+)
+
+ggplot(chr_long, aes(x = condition, y = chr, fill = source)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  scale_fill_manual(values = c("Linked (threshold 8)" = aviary_cols[["satin"]],
+                               "Truth" = aviary_cols[["wattle"]])) +
+  labs(x = NULL, y = "Case-hospitalisation ratio (%)", fill = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+## ----severity-details---------------------------------------------------------
+n_died_after_discharge <- linked_hosp |>
+  filter(died, dod_hosp > first_discharge_date_hosp) |>
+  nrow()
+
+pct_covid_coded <- linked_hosp |>
+  filter(admitted, diagnosis == "COVID-19") |>
+  summarise(pct = round(100 * mean(grepl("U07[.]1|B97[.]2", diagnosis_codes_hosp)))) |>
+  pull(pct)
+
+## ----ve-data------------------------------------------------------------------
+covid <- linked_hosp |>
+  filter(diagnosis == "COVID-19") |>
+  select(id_var, truth_id, age, onset_date, admitted, admitted_truth) |>
+  inner_join(linked_cov |> select(id_var, vaccination_status_cov), by = "id_var") |>
+  mutate(vaccinated   = vaccination_status_cov == "Vaccinated",
+         hospitalised = as.integer(admitted),
+         age_group    = cut(age, c(-Inf, 50, 65, 80, Inf), right = FALSE,
+                            labels = c("<50", "50-64", "65-79", "80+")))
+
+# The same exposure from the truth: a COVID-19 dose 14-182 days before onset
+vaccinated_truth_ids <- covid |>
+  select(id_var, truth_id, onset_date) |>
+  inner_join(clutch_air |>
+               filter(antigen == "COVID-19") |>
+               select(truth_id, date_of_service),
+             by = "truth_id", relationship = "many-to-many") |>
+  mutate(days_since_dose = as.numeric(onset_date - date_of_service)) |>
+  filter(days_since_dose >= 14, days_since_dose <= 182) |>
+  pull(id_var)
+
+covid <- covid |>
+  mutate(vaccinated_truth   = id_var %in% vaccinated_truth_ids,
+         hospitalised_truth = as.integer(admitted_truth))
+
+covid |>
+  mutate(vaccination = if_else(vaccinated, "Vaccinated", "Unvaccinated"),
+         admission   = if_else(hospitalised == 1, "admitted", "not admitted")) |>
+  count(age_group, vaccination, admission, name = "cases") |>
+  knitr::kable(caption = "COVID-19 cases by age group, vaccination status and admission (linked data)")
+
+## ----ve-models----------------------------------------------------------------
+ve_fits <- list(
+  "Crude (linked)"        = glm(hospitalised ~ vaccinated,
+                                family = poisson(link = "log"), data = covid),
+  "Age-adjusted (linked)" = glm(hospitalised ~ vaccinated + age_group,
+                                family = poisson(link = "log"), data = covid),
+  "Age-adjusted (truth)"  = glm(hospitalised_truth ~ vaccinated_truth + age_group,
+                                family = poisson(link = "log"), data = covid)
+)
+
+ve_rows <- list()
+for (model_name in names(ve_fits)) {
+  fit   <- ve_fits[[model_name]]
+  X     <- model.matrix(fit)
+  bread <- summary(fit)$cov.unscaled
+  meat  <- crossprod(X * (fit$y - fitted(fit)))
+  se    <- sqrt(diag(bread %*% meat %*% bread))[2]   # robust SE, vaccination term
+  b     <- coef(fit)[2]
+  ve_rows[[model_name]] <- tibble(
+    model = model_name,
+    VE    = round(100 * (1 - exp(b)), 1),
+    lower = round(100 * (1 - exp(b + 1.96 * se)), 1),
+    upper = round(100 * (1 - exp(b - 1.96 * se)), 1)
+  )
+}
+ve_table <- bind_rows(ve_rows)
+
+knitr::kable(ve_table, caption = "VE (%) against hospitalisation among COVID-19 cases, 95% CI (robust)")
+
+## ----ve-plot, fig.height = 2.8------------------------------------------------
+ve_table |>
+  mutate(model = factor(model, levels = rev(model))) |>
+  ggplot(aes(x = VE, y = model)) +
+  geom_vline(xintercept = 0, colour = aviary_cols[["slate"]], linetype = "dashed") +
+  geom_errorbar(aes(xmin = lower, xmax = upper), width = 0.2, orientation = "y",
+                colour = aviary_cols[["satin"]]) +
+  geom_point(size = 3, colour = aviary_cols[["chestnut"]]) +
+  labs(x = "Vaccine effectiveness against hospitalisation (%)", y = NULL) +
+  theme_minimal(base_size = 12)
 
 ## ----workflow-summary, eval = FALSE-------------------------------------------
 # library(starling)
-# data(cases_notifiable); data(vax_air)
+# library(mudnester)
+# library(dplyr)
 # 
-# # 1. Pre-linkage audit
-# preflight(cases_notifiable, vax_air,
-#           linkage_vars = c("lettername1", "lettername2", "dob", "medicare10"),
-#           medicare_col = "medicare10")
+# # 0. Clean every source the same way -- and the AIR for ONE vaccine type only
+# cases <- clutch_cases |>
+#   mutate(onset_date = coalesce(onset_date, specimen_date)) |>
+#   clean_the_nest(data_type = "cases", id_var = "notification_id", ...)
+# air <- clutch_air |>
+#   filter(antigen == "COVID-19") |>
+#   clean_the_nest(data_type = "vaccination", lie_nest_flat = TRUE,
+#                  medicare = "medicare_card", medicare_irn = "medicare_irn", ...)
+# hosp <- clutch_hospital |>
+#   mutate(sex = case_when(sex == "Male" ~ "M", sex == "Female" ~ "F")) |>
+#   clean_the_nest(data_type = "hospital", ...)
 # 
-# # 2. Medicare validation — replace invalid numbers with NA
-# cases <- check_medicare(cases_notifiable)
-# cases$medicare10 <- ifelse(cases$medicare_valid == 1L, cases$medicare10, NA_character_)
+# # 1-3. Audit, Medicare validation (invalid -> NA), blocking
+# preflight(cases, air, linkage_vars = c("lettername1", "lettername2", "dob", "medicare10"))
+# cases <- cases |>
+#   check_medicare() |>
+#   mutate(medicare10 = if_else(medicare_valid %in% 0L, NA_character_, medicare10)) |>
+#   flock(block1_vars = c("gender", "birth_year"), birth_year_col = "dob")
 # 
-# # 3. Blocking variables
-# cases <- flock(cases, block1_vars = "gender", birth_year_col = "dob")
-# vax   <- flock(vax_air, block1_vars = "gender", birth_year_col = "dob")
+# # 4. Look before trusting a threshold (threshold_value defaults to 16)
+# first_pass <- murmuration(data_x = cases, data_y = air,
+#   linkage_type = "cohort2event", event_type = "vaccination",
+#   event_date = "onset_date", id_var = "id_var", blocking_var = "block1",
+#   compare_vars = c("lettername1", "lettername2", "dob", "medicare10"),
+#   keep_pairs_pred = TRUE)
+# perch(attr(first_pass, "pairs_pred"), n_records_primary = nrow(cases))
+# murmuration_plot(first_pass)
 # 
-# # 4. Link (perch_before_linking = TRUE in interactive sessions)
-# linked <- murmuration(cases, vax,
-#   linkage_type    = "v2c",
-#   event_date      = "onset_date",
-#   id_var          = "id_var",
-#   blocking_var    = "block1",
-#   compare_vars    = c("lettername1", "lettername2", "dob", "medicare10"),
-#   threshold_value = 17)
+# # 5-7. Link at the chosen threshold, one call per event stream, then validate
+# vax <- murmuration(data_x = cases, data_y = air, ..., threshold_value = 8,
+#   suffix = "_cov",
+#   vax_window = list(days_before = 14, days_after = 0, lookback_days = 182))
+# adm <- murmuration(data_x = cases, data_y = hosp, linkage_type = "cohort2event",
+#   event_type = "hospitalisation", ..., threshold_value = 8, suffix = "_hosp")
 # 
-# # 5. Pass to mudnester or bowerbird for downstream analysis
+# # 8-10. Join on id_var and analyse
+# cohort <- adm |>
+#   inner_join(vax |> select(id_var, vaccination_status_cov), by = "id_var")
 
-## ----session, eval = TRUE-----------------------------------------------------
+## ----session------------------------------------------------------------------
 sessionInfo()
 

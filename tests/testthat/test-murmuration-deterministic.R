@@ -71,14 +71,14 @@ test_that(".murmuration_deterministic errors if key missing from a frame", {
   )
 })
 
-test_that(".murmuration_deterministic messages on non-unique df2 key", {
+test_that(".murmuration_deterministic messages on non-unique data_y key", {
   det <- getFromNamespace(".murmuration_deterministic", "starling")
   hosp <- make_hosp()
   hosp_dup <- rbind(hosp, hosp[1, ])            # duplicate john's key
   expect_message(
     det(make_cohort(), hosp_dup,
         compare_vars = c("lettername1", "lettername2", "dob")),
-    "not unique in df2"
+    "not unique in data_y"
   )
 })
 

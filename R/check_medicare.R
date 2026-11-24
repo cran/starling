@@ -12,11 +12,15 @@
 #' Validates Australian Medicare numbers using the official Services Australia
 #' check-digit algorithm: a Modulus 10 weighted checksum on digits 1-8,
 #' verified against the 9th digit. The 10-digit Medicare card number has the
-#' structure XXXXXXXXX C I, where digits 1-8 form the individual identifier,
-#' digit 9 (C) is the check digit derived from those 8 digits, and digit 10
-#' (I) is the Individual Reference Number (IRN) identifying family members on
-#' the same card. Only the check digit (position 9) is validated here; the IRN
-#' is not part of the checksum algorithm.
+#' structure XXXXXXXX C N: digits 1-8 identify the account, digit 9 (C) is the
+#' check digit derived from those 8 digits, and digit 10 (N) is the card's
+#' \emph{issue number}, which changes every time a card is reissued -- so one
+#' person can hold several 10-digit numbers over a lifetime. The Individual
+#' Reference Number (IRN), each person's position on a family card, is a
+#' separate 11th digit printed beside the name. Only the check digit (position 9)
+#' is validated here; neither the issue number nor the IRN is part of the
+#' checksum. For linkage, compare on \code{medicare09} (account + check digit)
+#' from \code{mudnester::clean_the_nest()}, which survives card reissue.
 #'
 #' @param data A data frame containing a Medicare number column.
 #' @param medicare_col Character. Name of the column containing Medicare
@@ -32,8 +36,8 @@
 #'   count, missing count, and a warning if the valid rate falls below 95\%.
 #' @param keep_digits Integer. Either \code{9} or \code{10} (default). Length
 #'   of a valid Medicare number string after stripping spaces and hyphens. Use
-#'   \code{10} for the full card number including IRN; use \code{9} for numbers
-#'   stored without the IRN.
+#'   \code{10} for the card number including its issue number (\code{medicare10});
+#'   use \code{9} for numbers stored without it (\code{medicare09}).
 #'
 #' @return The input data frame with two new columns appended:
 #'   \code{medicare_clean} (the Medicare number with spaces, hyphens, and dots
@@ -74,7 +78,6 @@
 #'
 #' @references
 #' Services Australia (2024). Medicare card number format and check digit.
-#' \url{https://www.servicesaustralia.gov.au/}
 #'
 #' @examples
 #' \dontrun{
@@ -96,9 +99,9 @@
 #'   NA_character_
 #' )
 #'
-#' # Validate 9-digit numbers (no IRN appended)
+#' # Validate 9-digit numbers (account + check digit, no issue number)
 #' cases_checked <- check_medicare(cases_clean,
-#'   medicare_col = "medicare9",
+#'   medicare_col = "medicare09",
 #'   keep_digits  = 9L)
 #' }
 #'
